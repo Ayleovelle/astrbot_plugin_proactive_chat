@@ -32,16 +32,31 @@ class SenderMixin:
 
     context: any
     session_data: dict
+    telemetry: any
 
     def _split_text(self, text: str, settings: dict) -> list[str]:
         """根据配置对文本进行分段。"""
         split_mode = settings.get("split_mode", "regex")
 
-        # 分段词列表模式
-        # 模式1：按分段词拆分（如句号、问号）
+        # 新版 AstrBot（如 v4.20.1+）中，分段正则本身不再承担“匹配后自动移除命中字符”的旧行为。
+        # 因此这里显式增加一个独立的内容清理阶段：
+        # 1. 先按 split_mode 执行“切段”；
+        # 2. 再在每个切好的分段上按 content_cleanup_rule 做二次清理。
+        # 这样可以与官方的 segmented_reply.content_cleanup_rule 机制保持一致。
+        enable_content_cleanup = settings.get("enable_content_cleanup", False)
+        # 只有开关开启时才启用内容过滤规则；关闭时直接置空，确保完全保持旧版插件行为。
+        content_cleanup_rule = (
+            settings.get("content_cleanup_rule", "") if enable_content_cleanup else ""
+        )
+
         if split_mode == "words":
+            # words 模式下，先用分段词列表识别切分点。
+            # 注意：这里的“切分”与“内容清理”是两件不同的事：
+            # - split_words 负责决定在哪里断句；
+            # - content_cleanup_rule 负责决定是否移除分段后的特定字符（如换行）。
             split_words = settings.get("split_words", ["。", "？", "！", "~", "…"])
             if not split_words:
+                # 用户未提供分段词时退化为不分段，避免构造空正则导致行为不可预期。
                 return [text]
 
             escaped_words = sorted(
@@ -57,13 +72,27 @@ class SenderMixin:
                     content = seg[0]
                     if not isinstance(content, str):
                         continue
+                    if content_cleanup_rule:
+                        # 这里的 re.sub 属于“分段后清理”：
+                        # content 已经是单个分段，不会再影响其他分段边界。
+                        # 这样可避免把正则切分职责与内容删除职责耦合在一起。
+                        content = re.sub(content_cleanup_rule, "", content)
                     if content.strip():
+                        # 清理后若只剩空白，则直接丢弃，避免发送空消息段。
                         result.append(content)
-                elif seg and seg.strip():
-                    result.append(seg)
+                elif seg:
+                    cleaned_seg = seg
+                    if content_cleanup_rule:
+                        # 极少数情况下 findall 可能返回非 tuple 的字符串分段；
+                        # 这里保持同样的清理策略，确保两类返回值行为一致。
+                        cleaned_seg = re.sub(content_cleanup_rule, "", cleaned_seg)
+                    if cleaned_seg.strip():
+                        result.append(cleaned_seg)
             return result if result else [text]
 
         # 正则分段模式
+        # regex 仅用于“如何找出每一个分段”，不再假设其天然具备“删除命中字符”的副作用。
+        # 若需要删除换行、句号等字符，应通过 content_cleanup_rule 明确声明。
         regex_pattern = settings.get("regex", r".*?[。？！~…\n]+|.+$")
         try:
             split_response = re.findall(regex_pattern, text, re.DOTALL | re.MULTILINE)
@@ -75,7 +104,17 @@ class SenderMixin:
                 r".*?[。？！~…\n]+|.+$", text, re.DOTALL | re.MULTILINE
             )
 
-        return [seg for seg in split_response if seg.strip()]
+        result: list[str] = []
+        for seg in split_response:
+            cleaned_seg = seg
+            if content_cleanup_rule:
+                # 与 words 模式保持一致：先完成切分，再对每段内容做独立清理。
+                # 这样当默认规则为 [\n] 时，可稳定去除分段回复中残留的空行字符。
+                cleaned_seg = re.sub(content_cleanup_rule, "", cleaned_seg)
+            if cleaned_seg.strip():
+                # 过滤掉清理后为空的分段，避免平台收到空 Plain 消息。
+                result.append(cleaned_seg)
+        return result if result else [text]
 
     async def _calc_interval(self, text: str, settings: dict) -> float:
         """计算分段回复的间隔时间。"""
@@ -178,6 +217,16 @@ class SenderMixin:
                     f"[主动消息] 执行装饰钩子失败喵！来源: {handler.handler_full_name}, "
                     f"错误类型: {error_type}, 错误详情: {e}"
                 )
+                if self.telemetry and self.telemetry.enabled:
+                    # 装饰钩子属于外围扩展链路，单独上报便于定位是否为第三方装饰器导致的问题。
+                    self._track_task(
+                        asyncio.create_task(
+                            self.telemetry.track_error(
+                                e,
+                                module="core.message_sender._trigger_decorating_hooks",
+                            )
+                        )
+                    )
                 if "Available" in error_type:
                     logger.error(
                         f"[主动消息] 抓到可能导致 ApiNotAvailable 的嫌疑人喵！模块: {handler.handler_module_path}"
@@ -233,6 +282,16 @@ class SenderMixin:
         except Exception as e:
             logger.error(f"[主动消息] 通过平台 {p_id} 发送失败喵: {e}")
             logger.debug(traceback.format_exc())
+            if self.telemetry and self.telemetry.enabled:
+                # 平台发送失败是实际送达链路的问题，与 LLM 生成失败应在遥测上分开统计。
+                self._track_task(
+                    asyncio.create_task(
+                        self.telemetry.track_error(
+                            e,
+                            module="core.message_sender._send_chain_with_hooks",
+                        )
+                    )
+                )
 
     async def _send_proactive_message(self, session_id: str, text: str) -> None:
         """发送主动消息（支持TTS与分段）。"""
@@ -266,6 +325,16 @@ class SenderMixin:
                         await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"[主动消息] 手动TTS流程发生异常喵: {e}")
+                if self.telemetry and self.telemetry.enabled:
+                    # TTS 失败不一定意味着文本发送失败，因此单独挂到 tts 子模块下记录。
+                    self._track_task(
+                        asyncio.create_task(
+                            self.telemetry.track_error(
+                                e,
+                                module="core.message_sender._send_proactive_message.tts",
+                            )
+                        )
+                    )
 
         # 是否继续发送文本：未发出 TTS 或配置要求始终发文本
         should_send_text = not is_tts_sent or tts_conf.get("always_send_text", True)
@@ -283,6 +352,28 @@ class SenderMixin:
                 logger.info(
                     f"[主动消息] 分段回复已启用，将发送 {len(segments)} 条消息喵。"
                 )
+                if self.telemetry and self.telemetry.enabled:
+                    # 这里只记录分段数、文本长度、TTS 开关等统计值，不上传任何消息正文内容。
+                    self._track_task(
+                        asyncio.create_task(
+                            self.telemetry.track_feature(
+                                "message_send_result",
+                                {
+                                    "session_type": session_config.get(
+                                        "_session_type", "unknown"
+                                    ),
+                                    "tts_enabled": bool(
+                                        tts_conf.get("enable_tts", True)
+                                    ),
+                                    "tts_sent": is_tts_sent,
+                                    "segmented_enabled": True,
+                                    "segment_count": len(segments),
+                                    "text_length": len(text),
+                                    "success": True,
+                                },
+                            )
+                        )
+                    )
 
                 # 分段顺序发送，段间按策略等待，模拟自然输出节奏
                 for idx, seg in enumerate(segments):
@@ -293,6 +384,28 @@ class SenderMixin:
                         await asyncio.sleep(interval)
             else:
                 await self._send_chain_with_hooks(session_id, [Plain(text=text)])
+                if self.telemetry and self.telemetry.enabled:
+                    # 非分段文本发送同样记录统一的发送统计，便于后续比较不同发送策略的使用占比。
+                    self._track_task(
+                        asyncio.create_task(
+                            self.telemetry.track_feature(
+                                "message_send_result",
+                                {
+                                    "session_type": session_config.get(
+                                        "_session_type", "unknown"
+                                    ),
+                                    "tts_enabled": bool(
+                                        tts_conf.get("enable_tts", True)
+                                    ),
+                                    "tts_sent": is_tts_sent,
+                                    "segmented_enabled": False,
+                                    "segment_count": 1,
+                                    "text_length": len(text),
+                                    "success": True,
+                                },
+                            )
+                        )
+                    )
 
         # Bot 在群聊发言后需要重置沉默计时
         if "group" in session_id.lower():

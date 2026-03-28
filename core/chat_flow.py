@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from datetime import datetime
@@ -22,6 +23,22 @@ class ProactiveCoreMixin:
     data_lock: any
     session_data: dict
     last_message_times: dict[str, float]
+    telemetry: any
+    manual_trigger_sessions: set[str]
+    web_admin_server: any
+
+    async def _clear_manual_trigger_state(self, session_id: str) -> None:
+        """释放指定会话的手动触发占用状态，并向管理端广播任务刷新。"""
+        normalized_session_id = self._normalize_session_id(session_id)
+        if normalized_session_id not in self.manual_trigger_sessions:
+            return
+
+        self.manual_trigger_sessions.discard(normalized_session_id)
+        if self.web_admin_server:
+            try:
+                await self.web_admin_server._broadcast_update("jobs")
+            except Exception as e:
+                logger.debug(f"[主动消息] 广播手动触发状态更新失败喵: {e}")
 
     async def _is_chat_allowed(self, session_id: str) -> bool:
         """检查是否允许进行主动聊天（条件检查）。"""
@@ -122,14 +139,15 @@ class ProactiveCoreMixin:
 
     async def check_and_chat(self, session_id: str) -> None:
         """由定时任务触发的核心函数，完成一次完整的主动消息流程。"""
+        normalized_session_id = self._normalize_session_id(session_id)
         try:
             # 免打扰与启用状态检查
-            if not await self._is_chat_allowed(session_id):
+            if not await self._is_chat_allowed(normalized_session_id):
                 logger.info("[主动消息] 当前为免打扰时段，跳过并重新调度喵。")
-                await self._schedule_next_chat_and_save(session_id)
+                await self._schedule_next_chat_and_save(normalized_session_id)
                 return
 
-            session_config = self._get_session_config(session_id)
+            session_config = self._get_session_config(normalized_session_id)
             if not session_config:
                 return
 
@@ -137,24 +155,39 @@ class ProactiveCoreMixin:
 
             # 未回复次数上限检查
             async with self.data_lock:
-                unanswered_count = self.session_data.get(session_id, {}).get(
+                unanswered_count = self.session_data.get(normalized_session_id, {}).get(
                     "unanswered_count", 0
                 )
                 max_unanswered = schedule_conf.get("max_unanswered_times", 3)
                 if max_unanswered > 0 and unanswered_count >= max_unanswered:
                     logger.info(
-                        f"[主动消息] {self._get_session_log_str(session_id, session_config)} 的未回复次数 ({unanswered_count}) 已达到上限 ({max_unanswered})，暂停主动消息喵。"
+                        f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} 的未回复次数 ({unanswered_count}) 已达到上限 ({max_unanswered})，暂停主动消息喵。"
                     )
                     return
 
             logger.info(
                 f"[主动消息] 开始生成第 {unanswered_count + 1} 次主动消息喵，当前未回复次数: {unanswered_count} 次喵。"
             )
+            if self.telemetry and self.telemetry.enabled:
+                # 在真正进入主流程时记录一次 feature，用于统计主动消息任务的触发频率与会话类型分布。
+                self._track_task(
+                    asyncio.create_task(
+                        self.telemetry.track_feature(
+                            "proactive_task_started",
+                            {
+                                "session_type": session_config.get(
+                                    "_session_type", "unknown"
+                                ),
+                                "unanswered_count": unanswered_count,
+                            },
+                        )
+                    )
+                )
 
             # 准备上下文与人格
-            request_package = await self._prepare_llm_request(session_id)
+            request_package = await self._prepare_llm_request(normalized_session_id)
             if not request_package:
-                await self._schedule_next_chat_and_save(session_id)
+                await self._schedule_next_chat_and_save(normalized_session_id)
                 return
 
             conv_id = request_package["conv_id"]
@@ -262,3 +295,16 @@ class ProactiveCoreMixin:
                 logger.error(
                     f"[主动消息] {self._get_session_log_str(session_id)} 可能需要手动干预喵。"
                 )
+
+            if self.telemetry and self.telemetry.enabled:
+                # 主流程致命错误统一挂到 check_and_chat 模块名下，便于和子链路异常区分统计。
+                self._track_task(
+                    asyncio.create_task(
+                        self.telemetry.track_error(
+                            e,
+                            module="core.chat_flow.check_and_chat",
+                        )
+                    )
+                )
+        finally:
+            await self._clear_manual_trigger_state(normalized_session_id)

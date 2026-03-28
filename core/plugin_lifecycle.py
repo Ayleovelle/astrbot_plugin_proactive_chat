@@ -17,6 +17,7 @@ class LifecycleMixin:
     context: star.Context
     data_lock: asyncio.Lock
     plugin_start_time: float
+    manual_trigger_sessions: set[str]
     scheduler: AsyncIOScheduler
     timezone: zoneinfo.ZoneInfo | None
     session_data: dict
@@ -27,6 +28,10 @@ class LifecycleMixin:
     session_data_file: any
     web_admin_server: any
     notification_center: any
+    telemetry: any
+    _heartbeat_task: asyncio.Task[None] | None
+    _original_exception_handler: any
+    _start_time: float
 
     async def initialize(self) -> None:
         """插件的异步初始化函数。"""
@@ -83,6 +88,22 @@ class LifecycleMixin:
             )
             self.timezone = None
 
+        # 初始化遥测生命周期
+        if self.telemetry and self.telemetry.enabled:
+            loop = asyncio.get_running_loop()
+            self._original_exception_handler = loop.get_exception_handler()
+            loop.set_exception_handler(self._handle_asyncio_exception)
+            self._start_time = __import__("time").monotonic()
+            # 启动阶段立即上报一次 startup，便于统计活跃安装量与运行环境分布。
+            self._track_task(asyncio.create_task(self.telemetry.track_startup()))
+            # 同时上报一次经脱敏后的配置快照，用于分析默认值与用户配置趋势。
+            self._track_task(
+                asyncio.create_task(self.telemetry.track_config(dict(self.config)))
+            )
+            # 心跳任务用于长期运行实例的活跃度统计，与启动事件互补。
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            logger.debug("[主动消息] 已启动遥测心跳任务喵。")
+
         # 启动调度器
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self.scheduler.start()
@@ -100,6 +121,16 @@ class LifecycleMixin:
                 await self.notification_center.start()
         except Exception as e:
             logger.error(f"[主动消息] 通知系统启动失败喵: {e}")
+            if self.telemetry and self.telemetry.enabled:
+                # 这里单独标记模块来源，便于区分“通知系统不可用”与主流程异常。
+                self._track_task(
+                    asyncio.create_task(
+                        self.telemetry.track_error(
+                            e,
+                            module="core.plugin_lifecycle.initialize.notification_center",
+                        )
+                    )
+                )
 
         # 启动 Web 管理端
         try:
@@ -107,11 +138,46 @@ class LifecycleMixin:
                 await self.web_admin_server.start()
         except Exception as e:
             logger.error(f"[主动消息] Web 管理端启动失败喵: {e}")
+            if self.telemetry and self.telemetry.enabled:
+                # Web 管理端属于附加能力，错误会上报但不会阻断插件主体运行。
+                self._track_task(
+                    asyncio.create_task(
+                        self.telemetry.track_error(
+                            e,
+                            module="core.plugin_lifecycle.initialize.web_admin_server",
+                        )
+                    )
+                )
 
     async def terminate(self) -> None:
         """插件被卸载或停用时调用的清理函数。"""
         logger.info("[主动消息] 收到插件终止指令，开始清理资源喵。")
         try:
+            if self._heartbeat_task:
+                self._heartbeat_task.cancel()
+                try:
+                    await self._heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                self._heartbeat_task = None
+
+            if self.telemetry and self.telemetry.enabled and self._start_time > 0:
+                runtime_seconds = __import__("time").monotonic() - self._start_time
+                # 终止前上报一次 shutdown，帮助服务端统计实例生命周期时长。
+                self._track_task(
+                    asyncio.create_task(
+                        self.telemetry.track_shutdown(
+                            exit_code=0, runtime_seconds=runtime_seconds
+                        )
+                    )
+                )
+                # shutdown 事件创建后立即等待清理，尽量提高终止事件送达概率。
+                await self._cleanup_telemetry_tasks()
+
+            if self._original_exception_handler is not None:
+                loop = asyncio.get_running_loop()
+                loop.set_exception_handler(self._original_exception_handler)
+                self._original_exception_handler = None
             # 取消群聊沉默计时器
             timer_count = len(self.group_timers)
             for session_id, timer in self.group_timers.items():
@@ -181,6 +247,22 @@ class LifecycleMixin:
                     await self.notification_center.stop()
                 except Exception as e:
                     logger.warning(f"[主动消息] 停止通知系统时出错喵: {e}")
+        except Exception as e:
+            logger.error(f"[主动消息] 生命周期终止阶段发生异常喵: {e}")
+            if self.telemetry and self.telemetry.enabled:
+                try:
+                    # terminate 阶段仍做 best-effort 错误上报，但绝不因为遥测再抛出新异常。
+                    await self.telemetry.track_error(
+                        e, module="core.plugin_lifecycle.terminate"
+                    )
+                except Exception:
+                    pass
         finally:
+            if self.telemetry:
+                try:
+                    await self.telemetry.close()
+                except Exception as e:
+                    logger.debug(f"[主动消息] 遥测会话关闭失败喵: {e}")
+
             # 确保终止日志一定输出
             logger.info("[主动消息] 主动消息插件已终止喵。")
