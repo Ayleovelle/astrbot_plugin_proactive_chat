@@ -13,7 +13,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
 
 from astrbot.api import logger
 
@@ -79,6 +78,8 @@ class WebAdminServer:
         self._tokens: dict[str, float] = {}
         # 仅当配置中设置了密码时才开启鉴权。
         self._auth_enabled = bool(self.config.get("web_admin", {}).get("password", ""))
+        # 缓存插件元数据版本，避免在高频状态轮询与广播中重复同步读取文件。
+        self._metadata_version = self._read_metadata_version()
 
         if FASTAPI_AVAILABLE:
             # 只有环境具备依赖时才构建 Web 应用，避免 import 失败影响插件主体。
@@ -195,8 +196,8 @@ class WebAdminServer:
 
         @self.app.get("/api/markdown-files/{file_path:path}")
         async def get_markdown_file(file_path: str):
-            # 文件路径来自 URL path 参数；这里先进行 URL 解码，再交给后续白名单解析逻辑统一判断。
-            resolved = self._resolve_markdown_document(unquote(file_path))
+            # FastAPI 已对 path 参数完成一次 URL 解码，这里直接交给白名单解析，避免重复解码破坏合法文件名。
+            resolved = self._resolve_markdown_document(file_path)
             if not resolved:
                 return JSONResponse(
                     {"error": "文档不存在或不允许访问"}, status_code=404
@@ -864,24 +865,24 @@ class WebAdminServer:
             "group_timer_cards": group_cards,
         }
 
+    def _read_metadata_version(self) -> str | None:
+        """读取插件 metadata.yaml 中声明的版本号。"""
+        try:
+            metadata_path = Path(__file__).resolve().parent.parent / "metadata.yaml"
+            if not metadata_path.exists():
+                return None
+
+            for line in metadata_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("version:"):
+                    return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+        except Exception as e:
+            logger.debug(f"[主动消息] 读取 metadata 版本失败喵: {e}")
+        return None
+
     def _build_status_payload(self) -> dict[str, Any]:
         now = time.time()
         uptime_sec = max(0, int(now - self.plugin.plugin_start_time))
-        metadata_version = None
-        try:
-            # 优先从 metadata.yaml 读取版本，兼容插件实例未显式暴露 version 属性的情况。
-            metadata_path = Path(__file__).resolve().parent.parent / "metadata.yaml"
-            if metadata_path.exists():
-                for line in metadata_path.read_text(encoding="utf-8").splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("version:"):
-                        metadata_version = (
-                            stripped.split(":", 1)[1].strip().strip('"').strip("'")
-                        )
-                        break
-        except Exception as e:
-            logger.debug(f"[主动消息] 读取 metadata 版本失败喵: {e}")
-
         timer_cards = self._collect_timer_cards(now)
 
         return {
@@ -889,7 +890,7 @@ class WebAdminServer:
             # 版本来源按优先级依次回退，保证控制台总能显示一个可读值。
             "version": getattr(self.plugin, "version", None)
             or getattr(self.plugin, "__version__", None)
-            or metadata_version
+            or self._metadata_version
             or "未知版本",
             "uptime_seconds": uptime_sec,
             # uptime 使用 datetime 差值字符串，便于直接面向人类展示。
@@ -1037,16 +1038,17 @@ class WebAdminServer:
                     continue
                 seen.add(normalized)
 
+                plugin_root = Path(__file__).resolve().parent.parent.resolve()
                 items.append(
                     {
                         "path": normalized,
                         # title 面向展示，filename 更偏向调试或原始文件识别。
                         "title": path.stem,
                         "filename": path.name,
-                        # category 便于前端未来按目录做分组；根目录文件统一标为 root。
-                        "category": path.parent.name
-                        if path.parent != path.parent.parent
-                        else "root",
+                        # category 便于前端未来按目录做分组；插件根目录下文件统一标为 root。
+                        "category": "root"
+                        if path.parent.resolve() == plugin_root
+                        else path.parent.name,
                     }
                 )
 
