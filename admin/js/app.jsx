@@ -75,6 +75,9 @@ function App() {
                     dispatch({ type: 'SET_NOTIFICATIONS', payload: data.notifications.items || [] });
                     dispatch({ type: 'SET_NOTIFICATIONS_META', payload: data.notifications.meta || null });
                 }
+                if (data.notificationsMeta) {
+                    dispatch({ type: 'SET_NOTIFICATIONS_META', payload: data.notificationsMeta || null });
+                }
                 if (Array.isArray(data.sessions)) {
                     // 后端可能返回字符串数组，也可能返回对象数组，这里统一标准化结构。
                     const mapped = data.sessions.map((s) =>

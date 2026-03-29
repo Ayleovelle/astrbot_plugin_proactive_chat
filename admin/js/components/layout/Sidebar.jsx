@@ -18,6 +18,7 @@ function Sidebar({ currentView, onChange }) {
     const { state } = useAppContext();
     // 版本号来自全局状态的 status 快照；未加载前先展示占位文本。
     const version = state.status?.version || '...';
+    const unreadNotificationCount = Math.max(0, Number(state.notificationsMeta?.unread_count ?? 0));
     const [logoSrc, setLogoSrc] = React.useState('/logo.png');
 
     React.useEffect(() => {
@@ -99,19 +100,28 @@ function Sidebar({ currentView, onChange }) {
             </div>
 
             <Box sx={{ flex: 1, mt: 4 }}>
-                {menus.map((item) => (
-                    <div
-                        key={item.key}
-                        className={`nav-item ${currentView === item.key ? 'active' : ''}`}
-                        // 导航只上抛目标视图 key，具体状态更新由父组件统一处理。
-                        onClick={() => onChange(item.key)}
-                    >
-                        <span style={{ fontSize: '18px' }}>{item.icon}</span>
-                        <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                            {item.label}
-                        </Typography>
-                    </div>
-                ))}
+                {menus.map((item) => {
+                    const showUnreadBadge = item.key === 'notifications' && unreadNotificationCount > 0;
+                    const unreadBadgeText = unreadNotificationCount > 99 ? '99+' : String(unreadNotificationCount);
+                    return (
+                        <div
+                            key={item.key}
+                            className={`nav-item ${currentView === item.key ? 'active' : ''}`}
+                            // 导航只上抛目标视图 key，具体状态更新由父组件统一处理。
+                            onClick={() => onChange(item.key)}
+                        >
+                            <span style={{ fontSize: '18px' }}>{item.icon}</span>
+                            <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                                {item.label}
+                            </Typography>
+                            {showUnreadBadge ? (
+                                <span className="sidebar-notification-badge" aria-label={`未读通知 ${unreadNotificationCount} 条`}>
+                                    {unreadBadgeText}
+                                </span>
+                            ) : null}
+                        </div>
+                    );
+                })}
             </Box>
 
             <Box sx={{ px: 2, pt: 0, pb: 0 }}>
