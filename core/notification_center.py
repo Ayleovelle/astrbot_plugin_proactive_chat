@@ -36,6 +36,7 @@ class NotificationCenter:
         self._poll_task: asyncio.Task | None = None
         # 防止手动刷新与定时轮询同时发起远端请求，造成重复写缓存。
         self._sync_in_progress = False
+        self._sync_state_lock = asyncio.Lock()
         # 统一缓存结构：同步时间、远端通知列表、本地已读映射。
         self._cache: dict[str, Any] = {
             "last_sync_at": None,
@@ -312,10 +313,11 @@ class NotificationCenter:
 
     async def refresh(self) -> bool:
         # 若已有同步在跑，则直接跳过，避免多协程重复覆盖缓存。
-        if self._sync_in_progress:
-            return False
+        async with self._sync_state_lock:
+            if self._sync_in_progress:
+                return False
+            self._sync_in_progress = True
 
-        self._sync_in_progress = True
         try:
             remote_items = await self._fetch_remote_items()
             async with self._lock:
@@ -341,7 +343,8 @@ class NotificationCenter:
             logger.warning(f"[主动消息] 同步远端通知失败喵: {e}")
             return False
         finally:
-            self._sync_in_progress = False
+            async with self._sync_state_lock:
+                self._sync_in_progress = False
 
     async def start(self) -> None:
         # 启动时先恢复本地缓存，确保前端即便远端短暂不可达也能看到历史通知。
