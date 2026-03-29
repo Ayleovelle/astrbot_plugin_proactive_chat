@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import zoneinfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -93,7 +94,7 @@ class LifecycleMixin:
             loop = asyncio.get_running_loop()
             self._original_exception_handler = loop.get_exception_handler()
             loop.set_exception_handler(self._handle_asyncio_exception)
-            self._start_time = __import__("time").monotonic()
+            self._start_time = time.monotonic()
             # 启动阶段立即上报一次 startup，便于统计活跃安装量与运行环境分布。
             self._track_task(asyncio.create_task(self.telemetry.track_startup()))
             # 同时上报一次经脱敏后的配置快照，用于分析默认值与用户配置趋势。
@@ -162,16 +163,15 @@ class LifecycleMixin:
                 self._heartbeat_task = None
 
             if self.telemetry and self.telemetry.enabled and self._start_time > 0:
-                runtime_seconds = __import__("time").monotonic() - self._start_time
-                # 终止前上报一次 shutdown，帮助服务端统计实例生命周期时长。
-                self._track_task(
-                    asyncio.create_task(
-                        self.telemetry.track_shutdown(
-                            exit_code=0, runtime_seconds=runtime_seconds
-                        )
+                runtime_seconds = time.monotonic() - self._start_time
+                # 终止前直接等待一次 shutdown 上报，避免任务刚创建就被后续清理逻辑取消。
+                try:
+                    await self.telemetry.track_shutdown(
+                        exit_code=0, runtime_seconds=runtime_seconds
                     )
-                )
-                # shutdown 事件创建后立即等待清理，尽量提高终止事件送达概率。
+                except Exception as e:
+                    logger.debug(f"[主动消息] shutdown 遥测上报失败喵: {e}")
+                # 再清理其余挂起的 telemetry tasks，避免遗留后台任务。
                 await self._cleanup_telemetry_tasks()
 
             if self._original_exception_handler is not None:
