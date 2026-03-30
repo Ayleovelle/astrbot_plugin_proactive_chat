@@ -51,7 +51,7 @@ body:
     attributes:
       label: 插件版本
       description: 请填写你当前使用的插件版本。
-      placeholder: 如: v1.2.0
+      placeholder: '如: v1.2.0'
     validations:
       required: true
 
@@ -59,7 +59,7 @@ body:
     attributes:
       label: AstrBot 版本
       description: 请填写你当前使用的 AstrBot 版本。
-      placeholder: 如: v4.22.1
+      placeholder: '如: v4.22.1'
     validations:
       required: true
 
@@ -116,7 +116,7 @@ body:
     attributes:
       label: 其他平台名称（如选择“其他平台”请填写）
       description: 如果你上面选择了“其他平台”，请在这里补充实际平台名称；否则可留空。
-      placeholder: 如: 某某社区适配器 / 自定义平台
+      placeholder: '如: 某某社区适配器 / 自定义平台'
 
   - type: dropdown
     attributes:
