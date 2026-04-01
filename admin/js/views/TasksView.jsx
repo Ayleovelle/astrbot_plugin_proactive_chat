@@ -117,7 +117,12 @@ function formatScheduleIntervalText(minMinutes, maxMinutes) {
     const hasMax = Number.isFinite(maxValue) && maxValue > 0;
 
     if (!hasMin && !hasMax) return '未配置';
-    if (hasMin && hasMax) return `${minValue} - ${Math.max(minValue, maxValue)} 分钟`;
+    if (hasMin && hasMax) {
+        if (minValue > maxValue) {
+            return `配置异常：${minValue} > ${maxValue} 分钟`;
+        }
+        return `${minValue} - ${maxValue} 分钟`;
+    }
     if (hasMin) return `${minValue} 分钟`;
     return `${maxValue} 分钟`;
 }
