@@ -184,8 +184,10 @@ class EventsMixin:
         if normalized_session_id != session_id:
             await self._cancel_all_related_auto_triggers(normalized_session_id)
 
-        # 避免重复刷屏日志
+        # 读取当前会话配置，供日志与启用状态判断复用，避免重复查询。
         session_config = self._get_session_config(normalized_session_id)
+
+        # 避免重复刷屏日志
         if session_config and session_config.get("enable", False):
             if normalized_session_id not in self.first_message_logged:
                 self.first_message_logged.add(normalized_session_id)
@@ -194,7 +196,6 @@ class EventsMixin:
                 )
 
         # 未启用或配置无效则跳过
-        session_config = self._get_session_config(normalized_session_id)
         if not session_config or not session_config.get("enable", False):
             logger.debug(
                 f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用或配置无效，跳过处理喵。"
