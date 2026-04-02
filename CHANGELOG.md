@@ -5,6 +5,21 @@
 <!-- markdownlint-disable MD041 -->
 # ChangeLog
 
+# 2026/04/02 v1.2.2
+
+## 🚀 What's Changed
+
+### 🐛 Bug Fixes (修复)
+
+- 修复了在 Telegram 适配器下，插件启动时可能因内部事件模块被重复扫描/注册而触发“注册指令报错”的问题 by @DBJD-CR in #52
+- 修复了配置密码的情况下，Web 端缺失密码填写入口的问题 by @DBJD-CR in #52
+
+---
+
+**Full Changelog**: https://github.com/DBJD-CR/astrbot_plugin_proactive_chat/compare/v1.2.1...v1.2.2
+
+---
+
 # 2026/04/01 v1.2.1
 
 ## 🚀 What's Changed

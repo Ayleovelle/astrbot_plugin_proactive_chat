@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent
 
 
 class EventsMixin:
@@ -19,7 +19,6 @@ class EventsMixin:
     first_message_logged: set[str]
     scheduler: Any
 
-    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=999)
     async def on_friend_message(self, event: AstrMessageEvent):
         """监听私聊消息，取消旧任务，并重置计时器和计数器。"""
         # 没有消息内容则无需处理
@@ -108,7 +107,6 @@ class EventsMixin:
             normalized_session_id, reset_counter=True
         )
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=998)
     async def on_group_message(self, event: AstrMessageEvent):
         """监听群聊消息流，重置沉默倒计时，并取消已计划的主动消息任务。"""
         if not event.get_messages():
@@ -186,8 +184,10 @@ class EventsMixin:
         if normalized_session_id != session_id:
             await self._cancel_all_related_auto_triggers(normalized_session_id)
 
-        # 避免重复刷屏日志
+        # 读取当前会话配置，供日志与启用状态判断复用，避免重复查询。
         session_config = self._get_session_config(normalized_session_id)
+
+        # 避免重复刷屏日志
         if session_config and session_config.get("enable", False):
             if normalized_session_id not in self.first_message_logged:
                 self.first_message_logged.add(normalized_session_id)
@@ -196,7 +196,6 @@ class EventsMixin:
                 )
 
         # 未启用或配置无效则跳过
-        session_config = self._get_session_config(normalized_session_id)
         if not session_config or not session_config.get("enable", False):
             logger.debug(
                 f"[主动消息] {self._get_session_log_str(session_id, session_config)} 未启用或配置无效，跳过处理喵。"
@@ -272,7 +271,6 @@ class EventsMixin:
             if changed:
                 await self._save_data_internal()
 
-    @filter.after_message_sent()
     async def on_after_message_sent(self, event: AstrMessageEvent):
         """监听 Bot 发送消息后事件，重置群聊沉默倒计时。"""
         session_id = event.unified_msg_origin
