@@ -5,6 +5,48 @@
 <!-- markdownlint-disable MD041 -->
 # ChangeLog
 
+# 2026/05/06 v1.2.3
+
+## 🚀 What's Changed
+
+### ✨ New Features (新功能)
+
+- 新增上下文注入来源配置项，支持 `AstrBot LLM 对话历史` (原有设计)、`平台完整聊天流水` 和 `混合模式` by @Sisyphbaous-DT-Project in #59
+  - `平台完整聊天流水`模式下支持可配置的主动消息提示词，并预设了新的提示词模板 by @DBJD-CR in #64
+  - 支持插件的原有占位符和完整的会话差异覆写支持 by @DBJD-CR in #64
+  - 新增占位符：`{{platform_history_lines}}`，代表实际注入的群聊流水正文 by @Sisyphbaous-DT-Project in #59
+- 前端中新增 `重新调度` 按钮，用于重新 roll 一次进行主动消息的时间 by @DBJD-CR in #64
+- 增强了前端中状态卡片和任务卡片携带的信息内容 by @DBJD-CR in #64
+- 增强了前端中的动画效果 by @DBJD-CR in #64
+
+### 🐛 Bug Fixes (修复)
+
+- 为 FastAPI 初始化失败添加了降级保护，避免插件加载完全失败 by @DBJD-CR in #64
+
+### 📚 Documentation (文档)
+
+- 更新 README 文档中的新配置项与更新日志 by @DBJD-CR in #64
+- 澄清了一些表述不清的配置说明 by @DBJD-CR in #64
+
+### 🔧 Chore (杂项)
+
+- 调整群聊默认使用的上下文来源为 `平台完整聊天流水` by @DBJD-CR in #64
+- 调整私聊默认的最大主动消息时间间隔为 600 分钟 by @DBJD-CR in #64
+- 移除了前端卡片右下角中的一个圆形阴影装饰 by @DBJD-CR in #64
+
+---
+
+## ❤️ New Contributors
+
+- @Sisyphbaous-DT-Project made their first contribution in #59
+
+**Full Changelog**: https://github.com/DBJD-CR/astrbot_plugin_proactive_chat/compare/v1.2.2...v1.2.3
+
+---
+
+<details>
+<summary>点击查看历史更新记录 (History)</summary>
+
 # 2026/04/02 v1.2.2
 
 ## 🚀 What's Changed
@@ -125,9 +167,6 @@
 **Full Changelog**: https://github.com/DBJD-CR/astrbot_plugin_proactive_chat/compare/v1.1.5...v1.2.0
 
 ---
-
-<details>
-<summary>点击查看历史更新记录 (History)</summary>
 
 # 2026/02/17 v1.1.5
 
