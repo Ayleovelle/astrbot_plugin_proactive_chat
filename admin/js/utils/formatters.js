@@ -110,7 +110,8 @@ function formatDateTime(value, timeZone = 'Asia/Shanghai', options = {}) {
         : `${parts.hour}:${parts.minute}`;
 
     // 统一输出为易读的“日期 + 时间”文本，供状态页、任务页、头部时钟复用。
-    return `${datePart} ${timePart}`;
+    // 日期与时间之间保留两个空格，增强卡片中时间文本的视觉层次。
+    return `${datePart}  ${timePart}`;
 }
 
 function formatFriendlyTime(value, timeZone = 'Asia/Shanghai') {

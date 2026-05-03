@@ -1598,6 +1598,7 @@ body.dark-theme .status-timer-info-item {
     font-weight: 600 !important;
     line-height: 1.45 !important;
     word-break: break-word;
+    white-space: pre-wrap;
 }
 
 .status-timer-info-value.is-emphasize {
