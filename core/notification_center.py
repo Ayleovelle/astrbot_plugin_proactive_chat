@@ -345,7 +345,7 @@ class NotificationCenter:
                 await self._save_cache_locked()
                 return changed
         except Exception as e:
-            logger.warning(f"[主动消息] 同步远端通知失败喵: {e}")
+            logger.warning(f"[主动消息] 同步远端通知失败喵: {e} (可忽略)")
             return False
         finally:
             async with self._sync_state_lock:
@@ -387,7 +387,7 @@ class NotificationCenter:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.warning(f"[主动消息] 通知轮询任务异常喵: {e}")
+                    logger.warning(f"[主动消息] 通知轮询任务异常喵: {e} (可忽略)")
 
         self._poll_task = asyncio.create_task(_poll_loop())
         logger.info("[主动消息] 通知系统已启动喵。")
