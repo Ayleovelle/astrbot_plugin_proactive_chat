@@ -387,6 +387,12 @@ function ConfigField({ fieldKey, schema, value, onChange, depth = 0, path = '', 
 
     // 若 Schema 给出了 options，则优先渲染为下拉选择框，而不是自由文本输入。
     if (schema.options && Array.isArray(schema.options)) {
+        const optionLabels = Array.isArray(schema.labels) ? schema.labels : [];
+        const optionLabelMap = new Map(
+            schema.options.map((option, index) => [option, optionLabels[index] || option])
+        );
+        const currentValue = localValue !== undefined ? localValue : (schema.default || '');
+
         return (
             <Box sx={{
                 display: 'flex',
@@ -403,10 +409,11 @@ function ConfigField({ fieldKey, schema, value, onChange, depth = 0, path = '', 
                         select
                         fullWidth
                         size="small"
-                        value={localValue !== undefined ? localValue : (schema.default || '')}
+                        value={currentValue}
                         onChange={(e) => handleChange(e.target.value)}
                         variant="outlined"
                         SelectProps={{
+                            renderValue: (selected) => optionLabelMap.get(selected) || selected,
                             MenuProps: {
                                 PaperProps: {
                                     sx: {
@@ -431,7 +438,7 @@ function ConfigField({ fieldKey, schema, value, onChange, depth = 0, path = '', 
                     >
                         {schema.options.map((option) => (
                             <MenuItem key={option} value={option} sx={{ justifyContent: 'center' }}>
-                                {option}
+                                {optionLabelMap.get(option) || option}
                             </MenuItem>
                         ))}
                     </TextField>
@@ -552,6 +559,7 @@ function getSessionSchemaEntries(schema, sessionType) {
         'auto_trigger_settings',
         'group_idle_trigger_minutes',
         'proactive_prompt',
+        'context_settings',
         'schedule_settings',
         'tts_settings',
         'segmented_reply_settings',
@@ -1049,52 +1057,6 @@ function ConfigRenderer() {
                 )}
             </Box>
 
-            {mode === 'session' && config && (
-                <Box sx={{ px: 3, pb: 0.5 }}>
-                    <Paper
-                        elevation={0}
-                        sx={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 2,
-                            px: 2.5,
-                            py: 1.75,
-                            borderRadius: 2.5,
-                            border: '1px solid',
-                            borderColor: sessionEnabled ? 'rgba(103, 80, 164, 0.22)' : 'rgba(244, 67, 54, 0.18)',
-                            background: sessionEnabled
-                                ? 'linear-gradient(135deg, rgba(103, 80, 164, 0.08) 0%, rgba(103, 80, 164, 0.03) 100%)'
-                                : 'linear-gradient(135deg, rgba(244, 67, 54, 0.08) 0%, rgba(244, 67, 54, 0.03) 100%)'
-                        }}
-                    >
-                        <Box sx={{ minWidth: 0 }}>
-                            <Typography variant="subtitle1" sx={{ fontWeight: 800, color: 'text.primary', mb: 0.25 }}>
-                                {sessionTypeLabel}会话启用状态
-                            </Typography>
-                            <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.5 }}>
-                                这是当前会话的独立开关。关闭后，该会话会暂停主动消息，但不会影响同类型的全局配置与其他会话。
-                            </Typography>
-                        </Box>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexShrink: 0 }}>
-                            <Chip
-                                size="small"
-                                color={sessionEnabled ? 'success' : 'default'}
-                                label={sessionEnabled ? '已启用' : '已暂停'}
-                                variant={sessionEnabled ? 'filled' : 'outlined'}
-                            />
-                            <Switch
-                                checked={sessionEnabled}
-                                onChange={(e) => {
-                                    isDirtyRef.current = true;
-                                    setConfig({ ...config, enable: e.target.checked });
-                                }}
-                            />
-                        </Box>
-                    </Paper>
-                </Box>
-            )}
-
             {/* 主编辑区：根据 schemaEntries 动态递归渲染所有当前可见配置项。 */}
             <Box
                 ref={scrollContainerRef}
@@ -1119,6 +1081,51 @@ function ConfigRenderer() {
                 }
             }}>
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    {mode === 'session' && config && (
+                        <Box sx={{ pb: 0.5 }}>
+                            <Paper
+                                elevation={0}
+                                sx={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 2,
+                                    px: 2.5,
+                                    py: 1.75,
+                                    borderRadius: 2.5,
+                                    border: '1px solid',
+                                    borderColor: sessionEnabled ? 'rgba(103, 80, 164, 0.22)' : 'rgba(244, 67, 54, 0.18)',
+                                    background: sessionEnabled
+                                        ? 'linear-gradient(135deg, rgba(103, 80, 164, 0.08) 0%, rgba(103, 80, 164, 0.03) 100%)'
+                                        : 'linear-gradient(135deg, rgba(244, 67, 54, 0.08) 0%, rgba(244, 67, 54, 0.03) 100%)'
+                                }}
+                            >
+                                <Box sx={{ minWidth: 0 }}>
+                                    <Typography variant="subtitle1" sx={{ fontWeight: 800, color: 'text.primary', mb: 0.25 }}>
+                                        {sessionTypeLabel}会话启用状态
+                                    </Typography>
+                                    <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.5 }}>
+                                        这是当前会话的独立开关。关闭后，该会话会暂停主动消息，但不会影响同类型的全局配置与其他会话。
+                                    </Typography>
+                                </Box>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexShrink: 0 }}>
+                                    <Chip
+                                        size="small"
+                                        color={sessionEnabled ? 'success' : 'default'}
+                                        label={sessionEnabled ? '已启用' : '已暂停'}
+                                        variant={sessionEnabled ? 'filled' : 'outlined'}
+                                    />
+                                    <Switch
+                                        checked={sessionEnabled}
+                                        onChange={(e) => {
+                                            isDirtyRef.current = true;
+                                            setConfig({ ...config, enable: e.target.checked });
+                                        }}
+                                    />
+                                </Box>
+                            </Paper>
+                        </Box>
+                    )}
                     {schemaEntries.map(([key, subSchema]) => (
                         <Box key={key} sx={{ width: '100%' }}>
                             <ConfigField
