@@ -21,6 +21,7 @@ class SessionOverrideManager:
         "enable",
         "session_name",
         "proactive_prompt",
+        "context_settings",
         "auto_trigger_settings",
         "schedule_settings",
         "tts_settings",
