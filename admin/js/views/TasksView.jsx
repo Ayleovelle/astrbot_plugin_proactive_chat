@@ -127,24 +127,6 @@ function formatScheduleIntervalText(minMinutes, maxMinutes) {
     return `${maxValue} 分钟`;
 }
 
-function resolveSourceModeLabel(sourceMode) {
-    const normalized = String(sourceMode || '').trim().toLowerCase();
-    switch (normalized) {
-        case 'platform_message_history':
-            return '平台完整聊天流水';
-        case 'hybrid':
-            return '混合模式';
-        case 'conversation_history':
-        default:
-            return '当前 AstrBot LLM 对话历史';
-    }
-}
-
-function formatUnansweredLabel(currentCount, maxCount) {
-    const current = Math.max(0, Number(currentCount) || 0);
-    const max = Math.max(0, Number(maxCount) || 0);
-    return max > 0 ? `未回复次数: ${current}/${max}` : `未回复: ${current}`;
-}
 
 function TasksView({ onRefresh }) {
     const { state, dispatch } = useAppContext();
