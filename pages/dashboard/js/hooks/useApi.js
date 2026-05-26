@@ -19,19 +19,19 @@ function useApi() {
         []
     );
     const getSessionConfig = React.useCallback(
-        // 会话 ID 可能包含特殊字符，因此路径参数必须先进行 encodeURIComponent。
-        (session) => window.HttpUtil.get(`/api/session-config/${encodeURIComponent(session)}`),
+        // Pages 模式下使用 query param 传递 session（register_web_api 不支持路径参数）。
+        (session) => window.HttpUtil.get(`/api/session-config?session=${encodeURIComponent(session)}`),
         []
     );
     const updateSessionConfig = React.useCallback(
         // 同一个接口同时支持 override 与 effective 两种保存模式，由 payload.mode 区分。
         (session, payload) =>
-            window.HttpUtil.post(`/api/session-config/${encodeURIComponent(session)}`, payload),
+            window.HttpUtil.post('/api/session-config', Object.assign({ session }, payload)),
         []
     );
     const resetSessionConfig = React.useCallback(
         // 删除会话覆写后，该会话会重新完全继承全局配置。
-        (session) => window.HttpUtil.del(`/api/session-config/${encodeURIComponent(session)}`),
+        (session) => window.HttpUtil.post('/api/session-config/reset', { session }),
         []
     );
 
@@ -41,7 +41,7 @@ function useApi() {
         []
     );
     const getMarkdownFile = React.useCallback(
-        (path) => window.HttpUtil.get(`/api/markdown-files/${encodeURIComponent(path)}`),
+        (path) => window.HttpUtil.get(`/api/markdown-file?path=${encodeURIComponent(path)}`),
         []
     );
     const getNotifications = React.useCallback(
@@ -61,22 +61,21 @@ function useApi() {
         []
     );
     const triggerJob = React.useCallback(
-        // “立即触发”接口本质上是一个无参 POST，因此 body 传空对象保持请求格式统一。
-        (session) => window.HttpUtil.post(`/api/jobs/${encodeURIComponent(session)}/trigger`, {}),
+        // "立即触发"通过 body 传 session，与 pages_adapter 路由匹配。
+        (session) => window.HttpUtil.post('/api/jobs/trigger', { session }),
         []
     );
     const cancelJob = React.useCallback(
-        (session) => window.HttpUtil.del(`/api/jobs/${encodeURIComponent(session)}`),
+        (session) => window.HttpUtil.post('/api/jobs/cancel', { session }),
         []
     );
     const rescheduleJob = React.useCallback(
-        (session) => window.HttpUtil.post(`/api/jobs/${encodeURIComponent(session)}/reschedule`, {}),
+        (session) => window.HttpUtil.post('/api/jobs/reschedule', { session }),
         []
     );
 
     return React.useMemo(
         () => ({
-            // 通过 useMemo 返回统一 API 对象，确保消费方在依赖比较时具备稳定引用。
             getStatus,
             getConfig,
             getConfigSchema,

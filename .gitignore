@@ -206,3 +206,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Build artifacts
+*.zip
+
+# Mermaid too large for git, lazy-loaded at runtime
+pages/dashboard/vendor/mermaid.min.js

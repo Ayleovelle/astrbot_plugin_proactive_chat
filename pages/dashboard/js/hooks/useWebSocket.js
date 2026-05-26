@@ -1,6 +1,14 @@
 ﻿/**
  * 文件职责：WebSocket Hook，负责全局单例连接管理与实时消息分发。
+ * Bridge 模式（AstrBot Dashboard iframe）下 WebSocket 不可用，自动降级为轮询。
  */
+
+function __isBridgeMode() {
+    // iframe 模式下 WebSocket 不可用（sandbox 限制），直接判定为 bridge 模式跳过。
+    try { if (window.self !== window.top) return true; } catch (e) { return true; }
+    var b = window.AstrBotPluginPage;
+    return b && (typeof b.fetch === "function" || typeof b.apiGet === "function");
+}
 
 // 管理端全局只维护一个 WebSocket 连接，避免多个组件重复建立相同连接。
 let __globalWs = null;
@@ -11,6 +19,10 @@ let __reconnectTimer = null;
 const WS_RECONNECT_BASE_DELAY_MS = 1000;
 const WS_RECONNECT_MAX_DELAY_MS = 10000;
 let __nextReconnectDelayMs = WS_RECONNECT_BASE_DELAY_MS;
+
+// Bridge 模式下的轮询降级参数。
+let __pollingTimer = null;
+const WS_POLLING_INTERVAL_MS = 5000;
 
 function clearReconnectTimer() {
     if (!__reconnectTimer) return;
@@ -38,8 +50,41 @@ function scheduleReconnect() {
     }, delay);
 }
 
+// Bridge 模式降级轮询：定时拉取 status 接口模拟实时更新。
+function startPolling() {
+    if (__pollingTimer) return;
+    async function poll() {
+        if (__wsListeners.size === 0) {
+            stopPolling();
+            return;
+        }
+        try {
+            const data = await window.HttpUtil.get('/api/status');
+            if (data && !data.error) {
+                __wsListeners.forEach((listener) => {
+                    try { listener(data); } catch (e) {}
+                });
+            }
+        } catch (e) {}
+        __pollingTimer = setTimeout(poll, WS_POLLING_INTERVAL_MS);
+    }
+    poll();
+}
+
+function stopPolling() {
+    if (__pollingTimer) {
+        clearTimeout(__pollingTimer);
+        __pollingTimer = null;
+    }
+}
+
 function ensureGlobalWs() {
-    // 若连接已存在且仍处于“连接中 / 已连接”状态，则直接复用。
+    // Bridge 模式下 iframe sandbox 禁止 WebSocket，且 app.jsx 已有独立轮询，无需额外降级。
+    if (__isBridgeMode()) {
+        return;
+    }
+
+    // 若连接已存在且仍处于"连接中 / 已连接"状态，则直接复用。
     if (__globalWs && (__globalWs.readyState === WebSocket.OPEN || __globalWs.readyState === WebSocket.CONNECTING)) {
         return;
     }
@@ -66,33 +111,18 @@ function ensureGlobalWs() {
             if (msg.type === 'full_update' || msg.type === 'update') {
                 const data = msg.data || {};
                 __wsListeners.forEach((listener) => {
-                    try {
-                        // 将后端 payload 原样广播给所有订阅者，由页面组件自行决定如何消费。
-                        listener(data);
-                    } catch (e) {
-                        // 单个监听器报错不应影响其他订阅者继续接收消息。
-                    }
+                    try { listener(data); } catch (e) {}
                 });
             }
-        } catch (e) {
-            // 非 JSON 消息或异常格式直接忽略，避免污染控制台与中断连接。
-        }
+        } catch (e) {}
     };
 
     ws.onerror = function () {
-        // 出错后主动触发 close 流程，统一走 onclose 的回收与重连路径。
-        try {
-            ws.close();
-        } catch (e) {
-            // 某些浏览器状态下 close 可能抛错，这里吞掉即可。
-        }
+        try { ws.close(); } catch (e) {}
     };
 
     ws.onclose = function () {
-        // 仅处理当前活动连接的关闭事件，避免旧连接回调干扰新的连接状态。
-        if (__globalWs !== ws) {
-            return;
-        }
+        if (__globalWs !== ws) return;
         __globalWs = null;
         // 连接关闭后自动尝试重连，覆盖插件重载等短暂不可用场景。
         scheduleReconnect();
@@ -105,23 +135,20 @@ function useWebSocket(onData) {
             __wsListeners.add(onData);
         }
 
-        // 只要有任意一个订阅者存在，就确保全局连接已建立。
+        // 只要有任意一个订阅者存在，就确保全局连接（或轮询）已建立。
         ensureGlobalWs();
 
         return () => {
             if (typeof onData === 'function') {
                 __wsListeners.delete(onData);
             }
-            // 最后一个订阅者离开时主动关闭连接，减少空闲资源占用。
+            // 最后一个订阅者离开时主动关闭连接/轮询，减少空闲资源占用。
             if (__wsListeners.size === 0) {
                 clearReconnectTimer();
+                stopPolling();
                 __nextReconnectDelayMs = WS_RECONNECT_BASE_DELAY_MS;
                 if (__globalWs) {
-                    try {
-                        __globalWs.close();
-                    } catch (e) {
-                        // 某些浏览器状态下 close 可能抛错，这里吞掉即可。
-                    }
+                    try { __globalWs.close(); } catch (e) {}
                 }
                 __globalWs = null;
             }

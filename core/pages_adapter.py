@@ -34,7 +34,6 @@ class PagesAdapter:
 
         P = PLUGIN_NAME
         routes: list[tuple[str, Any, list[str], str]] = [
-            (f"/{P}/dashboard", self._page_handler, ["GET"], "主动消息 Dashboard 页面"),
             (f"/{P}/api/status", self._status_handler, ["GET"], "主动消息状态 API"),
             (f"/{P}/api/config", self._config_get_handler, ["GET"], "主动消息配置读取"),
             (f"/{P}/api/config", self._config_post_handler, ["POST"], "主动消息配置写入"),
@@ -54,6 +53,8 @@ class PagesAdapter:
             (f"/{P}/api/markdown-files", self._markdown_files_handler, ["GET"], "主动消息文档列表"),
             (f"/{P}/api/markdown-file", self._markdown_file_handler, ["GET"], "主动消息文档内容"),
             (f"/{P}/logo.png", self._logo_handler, ["GET"], "主动消息插件 Logo"),
+            (f"/{P}/assets/logo.png", self._logo_handler, ["GET"], "主动消息插件 Logo (compat)"),
+            (f"/{P}/api/logo-data", self._logo_data_handler, ["GET"], "主动消息 Logo base64"),
         ]
 
         for path, handler, methods, desc in routes:
@@ -68,15 +69,6 @@ class PagesAdapter:
     def _server(self):
         return self._plugin.web_admin_server
 
-    async def _page_handler(self, **kwargs) -> Any:
-        from quart import Response
-
-        page_path = self._pages_dir / "index.html"
-        if not page_path.exists():
-            return Response("Dashboard page not found", status=404)
-        html = await asyncio.to_thread(page_path.read_text, encoding="utf-8")
-        return Response(html, content_type="text/html; charset=utf-8")
-
     async def _logo_handler(self, **kwargs) -> Any:
         from quart import Response
 
@@ -85,6 +77,17 @@ class PagesAdapter:
             return Response("Not found", status=404)
         data = await asyncio.to_thread(logo_path.read_bytes)
         return Response(data, content_type="image/png")
+
+    async def _logo_data_handler(self, **kwargs) -> Any:
+        """返回 logo 的 base64 data URL，供 iframe sandbox 内无法直接加载图片时使用。"""
+        import base64
+
+        logo_path = Path(__file__).resolve().parent.parent / "logo.png"
+        if not logo_path.exists():
+            return {"error": "Logo not found"}
+        data = await asyncio.to_thread(logo_path.read_bytes)
+        b64 = base64.b64encode(data).decode("ascii")
+        return {"data_url": f"data:image/png;base64,{b64}"}
 
     async def _status_handler(self, **kwargs) -> Any:
         if not self._server:

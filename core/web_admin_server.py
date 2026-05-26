@@ -108,16 +108,12 @@ class WebAdminServer:
             description="主动消息插件独立 WebUI",
         )
 
-        # 管理端通常运行在本地独立端口；在允许凭据时使用显式本地来源列表，避免 "*" 带来的安全/兼容问题。
+        # 管理端通常运行在本地独立端口；
+        # 同时允许 AstrBot Dashboard iframe（sandbox origin 为 "null"）直接访问 API。
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=[
-                "http://localhost:4100",
-                "http://127.0.0.1:4100",
-                "http://localhost",
-                "http://127.0.0.1",
-            ],
-            allow_credentials=True,
+            allow_origins=["*"],
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -135,6 +131,16 @@ class WebAdminServer:
 
             # 非 API 路径主要是静态文件，不在这里拦截，前端自行处理启动页逻辑。
             if not path.startswith("/api"):
+                return await call_next(request)
+
+            # CORS preflight 请求（OPTIONS）必须放行，否则浏览器无法完成跨域握手。
+            if request.method == "OPTIONS":
+                return await call_next(request)
+
+            # AstrBot Dashboard iframe（sandbox origin 为 "null"）的请求跳过独立认证，
+            # 因为用户已通过 AstrBot Dashboard 自身的登录机制完成身份验证。
+            origin = request.headers.get("Origin", "")
+            if origin == "null":
                 return await call_next(request)
 
             # API 请求统一使用 Bearer Token 认证，避免把 token 暴露在 query 参数里。
@@ -157,15 +163,15 @@ class WebAdminServer:
         if not self.app:
             return
 
-        # admin 目录位于插件根目录下，是整个前端控制台的静态资源根路径。
-        admin_dir = Path(__file__).resolve().parent.parent / "admin"
-        if admin_dir.exists():
+        # pages/dashboard 目录是前端控制台的静态资源根路径（同时供 AstrBot Pages 和独立端口使用）。
+        dashboard_dir = Path(__file__).resolve().parent.parent / "pages" / "dashboard"
+        if dashboard_dir.exists():
             # 将根路径直接挂到静态文件目录，便于通过 / 访问前端页面。
             self.app.mount(
-                "/", StaticFiles(directory=str(admin_dir), html=True), name="admin"
+                "/", StaticFiles(directory=str(dashboard_dir), html=True), name="admin"
             )
         else:
-            logger.warning(f"[主动消息] 未找到管理端静态目录喵: {admin_dir}")
+            logger.warning(f"[主动消息] 未找到管理端静态目录喵: {dashboard_dir}")
 
     def _register_routes(self) -> None:
         if not self.app:
@@ -210,8 +216,18 @@ class WebAdminServer:
             # 仅暴露插件目录内明确允许浏览的 Markdown 文档，避免前端任意探测文件系统。
             return {"items": self._list_markdown_documents()}
 
+        @self.app.get("/api/markdown-file")
+        async def get_markdown_file_by_query(path: str = ""):
+            # Pages 兼容路由：通过 query param 获取文档（register_web_api 不支持路径参数）。
+            if not path:
+                return JSONResponse({"error": "缺少 path 参数"}, status_code=400)
+            return await get_markdown_file_impl(path)
+
         @self.app.get("/api/markdown-files/{file_path:path}")
         async def get_markdown_file(file_path: str):
+            return await get_markdown_file_impl(file_path)
+
+        async def get_markdown_file_impl(file_path: str):
             # FastAPI 已对 path 参数完成一次 URL 解码，这里直接交给白名单解析，避免重复解码破坏合法文件名。
             resolved = self._resolve_markdown_document(file_path)
             if not resolved:
@@ -412,6 +428,27 @@ class WebAdminServer:
                 "override": {},
                 "effective": self.plugin._get_session_config(normalized),
             }
+
+        # Pages 兼容路由：前端统一使用 query/body param 传 session。
+        @self.app.get("/api/session-config")
+        async def get_session_config_compat(session: str = ""):
+            if not session:
+                return JSONResponse({"error": "缺少 session 参数"}, status_code=400)
+            return await get_session_config(session)
+
+        @self.app.post("/api/session-config")
+        async def update_session_config_compat(payload: dict[str, Any]):
+            session = payload.pop("session", "")
+            if not session:
+                return JSONResponse({"error": "缺少 session 参数"}, status_code=400)
+            return await update_session_config(session, payload)
+
+        @self.app.post("/api/session-config/reset")
+        async def reset_session_config_compat(payload: dict[str, Any]):
+            session = payload.get("session", "")
+            if not session:
+                return JSONResponse({"error": "缺少 session 参数"}, status_code=400)
+            return await reset_session_config(session)
 
         @self.app.get("/api/jobs")
         async def list_jobs():
@@ -652,6 +689,28 @@ class WebAdminServer:
 
             await self._broadcast_update("jobs")
             return {"ok": True, "session": normalized, "removed": removed}
+
+        # Pages 兼容路由：前端统一使用 POST + body 传 session 的方式调用。
+        @self.app.post("/api/jobs/trigger")
+        async def trigger_job_compat(payload: dict[str, Any]):
+            session = payload.get("session", "")
+            if not session:
+                return JSONResponse({"error": "缺少 session 参数"}, status_code=400)
+            return await trigger_job(session)
+
+        @self.app.post("/api/jobs/cancel")
+        async def cancel_job_compat(payload: dict[str, Any]):
+            session = payload.get("session", "")
+            if not session:
+                return JSONResponse({"error": "缺少 session 参数"}, status_code=400)
+            return await cancel_job(session)
+
+        @self.app.post("/api/jobs/reschedule")
+        async def reschedule_job_compat(payload: dict[str, Any]):
+            session = payload.get("session", "")
+            if not session:
+                return JSONResponse({"error": "缺少 session 参数"}, status_code=400)
+            return await reschedule_job(session)
 
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
