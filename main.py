@@ -27,6 +27,7 @@ from .core.session_override_manager import SessionOverrideManager
 from .core.session_parser import SessionMixin
 from .core.task_scheduler import SchedulerMixin
 from .core.telemetry_manager import TelemetryManager
+from .core.pages_adapter import PagesAdapter
 from .core.web_admin_server import WebAdminServer
 from .utils.version import get_plugin_version
 
@@ -105,6 +106,10 @@ class ProactiveChatPlugin(
         self.plugin_start_time = time.time()
         self.first_message_logged: set[str] = set()
         self._cleanup_counter = 0
+
+        # AstrBot Dashboard Pages 适配层
+        self.pages_adapter = PagesAdapter(self)
+        self.pages_adapter.register(context)
 
         logger.info("[主动消息] 插件实例已创建喵。")
 
