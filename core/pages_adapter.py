@@ -7,6 +7,7 @@ register_web_api 机制暴露，使管理端可以在 AstrBot Dashboard 的
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -73,7 +74,7 @@ class PagesAdapter:
         page_path = self._pages_dir / "index.html"
         if not page_path.exists():
             return Response("Dashboard page not found", status=404)
-        html = page_path.read_text(encoding="utf-8")
+        html = await asyncio.to_thread(page_path.read_text, encoding="utf-8")
         return Response(html, content_type="text/html; charset=utf-8")
 
     async def _logo_handler(self, **kwargs) -> Any:
@@ -82,7 +83,7 @@ class PagesAdapter:
         logo_path = Path(__file__).resolve().parent.parent / "logo.png"
         if not logo_path.exists():
             return Response("Not found", status=404)
-        data = logo_path.read_bytes()
+        data = await asyncio.to_thread(logo_path.read_bytes)
         return Response(data, content_type="image/png")
 
     async def _status_handler(self, **kwargs) -> Any:
@@ -125,13 +126,19 @@ class PagesAdapter:
 
         if self._server:
             self._server._save_plugin_config()
+        elif hasattr(config, "save_config"):
+            try:
+                config.save_config()
+            except Exception as e:
+                logger.warning(f"[主动消息] Pages 适配层保存配置失败: {e}")
         return {"ok": True}
 
     async def _config_schema_handler(self, **kwargs) -> Any:
         schema_path = Path(__file__).resolve().parent.parent / "_conf_schema.json"
         if schema_path.exists():
             try:
-                return json.loads(schema_path.read_text(encoding="utf-8"))
+                content = await asyncio.to_thread(schema_path.read_text, encoding="utf-8")
+                return json.loads(content)
             except Exception:
                 pass
         return {}
@@ -168,16 +175,18 @@ class PagesAdapter:
 
         normalized = self._plugin._normalize_session_id(session)
         removed = False
-        try:
-            self._plugin.scheduler.remove_job(normalized)
-            removed = True
-        except Exception:
-            pass
+        if self._plugin.scheduler:
+            try:
+                self._plugin.scheduler.remove_job(normalized)
+                removed = True
+            except Exception:
+                pass
 
-        async with self._plugin.data_lock:
-            if normalized in self._plugin.session_data:
-                self._plugin.session_data[normalized].pop("next_trigger_time", None)
-                await self._plugin._save_data_internal()
+        if self._plugin.data_lock:
+            async with self._plugin.data_lock:
+                if normalized in self._plugin.session_data:
+                    self._plugin.session_data[normalized].pop("next_trigger_time", None)
+                    await self._plugin._save_data_internal()
 
         return {"ok": True, "session": normalized, "removed": removed}
 
@@ -190,6 +199,8 @@ class PagesAdapter:
             return {"error": "缺少 session 参数"}
 
         normalized = self._plugin._normalize_session_id(session)
+        if not self._plugin.scheduler:
+            return {"ok": False, "error": "调度器未初始化"}
         session_config = self._plugin._get_session_config(normalized)
         if not session_config or not session_config.get("enable", False):
             return {"ok": False, "error": "会话未启用或配置不存在"}
@@ -337,7 +348,7 @@ class PagesAdapter:
             return {"error": "文档不存在或不允许访问"}
 
         try:
-            content = resolved.read_text(encoding="utf-8")
+            content = await asyncio.to_thread(resolved.read_text, encoding="utf-8")
         except Exception as e:
             return {"error": f"读取文档失败: {e}"}
 
