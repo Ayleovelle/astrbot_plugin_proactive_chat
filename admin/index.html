@@ -36,31 +36,31 @@
         var libs = isCN ? [
             '/react/18.2.0/files/umd/react.production.min.js',
             '/react-dom/18.2.0/files/umd/react-dom.production.min.js',
-            '/@babel/standalone/7.25.6/files/babel.min.js',
             '/@mui/material/5.16.7/files/umd/material-ui.production.min.js',
             '/@emotion/react/11.13.3/files/dist/emotion-react.umd.min.js',
             '/@emotion/styled/11.13.0/files/dist/emotion-styled.umd.min.js',
             '/marked/14.1.2/files/marked.min.js',
             '/dompurify/3.1.6/files/dist/purify.min.js',
-            '/mermaid/11.4.1/files/dist/mermaid.min.js'
+            '/mermaid/11.4.1/files/dist/mermaid.min.js',
+            '/@babel/standalone/7.25.6/files/babel.min.js'
         ] : [
             '/react@18.2.0/umd/react.production.min.js',
             '/react-dom@18.2.0/umd/react-dom.production.min.js',
-            '/@babel/standalone@7.25.6/babel.min.js',
             '/@mui/material@5.16.7/umd/material-ui.production.min.js',
             '/@emotion/react@11.13.3/dist/emotion-react.umd.min.js',
             '/@emotion/styled@11.13.0/dist/emotion-styled.umd.min.js',
             '/marked@14.1.2/marked.min.js',
             '/dompurify@3.1.6/dist/purify.min.js',
-            '/mermaid@11.4.1/dist/mermaid.min.js'
+            '/mermaid@11.4.1/dist/mermaid.min.js',
+            '/@babel/standalone@7.25.6/babel.min.js'
         ];
 
-        // 通过 DOM API 创建 script 元素，兼容 CSP 且比 document.write 更可靠。
+        // 动态脚本设 async=false 保证按插入顺序执行；Babel 放最后确保处理 JSX 时所有依赖已就绪。
         var head = document.head || document.getElementsByTagName('head')[0];
         for (var i = 0; i < libs.length; i++) {
             var s = document.createElement('script');
             s.src = base + libs[i];
-            s.defer = true;
+            s.async = false;
             if (i < 2) s.crossOrigin = 'anonymous';
             head.appendChild(s);
         }
