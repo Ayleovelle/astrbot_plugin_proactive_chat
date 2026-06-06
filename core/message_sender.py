@@ -489,6 +489,19 @@ class SenderMixin:
                         )
                     )
 
+        # 配图：根据会话配置决定是否生成并发送图片。
+        # 图片由本插件统一发送，走与文本相同的装饰钩子与平台历史持久化流程。
+        try:
+            images = await self._maybe_generate_proactive_images(
+                session_id, text, session_config
+            )
+            for image in images:
+                await self._send_chain_with_hooks(session_id, [image])
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            # 配图属增强能力，任何异常都不应影响已发送的文本主流程。
+            logger.warning(f"[主动消息] 发送主动消息配图时出现异常喵: {e!r}")
+
         # Bot 在群聊发言后需要重置沉默计时
         if "group" in session_id.lower():
             await self._reset_group_silence_timer(session_id)
