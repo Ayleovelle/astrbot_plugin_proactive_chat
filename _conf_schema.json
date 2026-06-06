@@ -158,6 +158,34 @@
                     }
                 }
             },
+            "image_settings": {
+                "description": "🖼️ 私聊主动消息配图设置",
+                "type": "object",
+                "items": {
+                    "mode": {
+                        "description": "🎨 配图模式",
+                        "type": "string",
+                        "options": [
+                            "off",
+                            "auto",
+                            "always"
+                        ],
+                        "default": "off",
+                        "labels": [
+                            "不生图",
+                            "Bot 自行判断",
+                            "直接生图"
+                        ],
+                        "hint": "off=只发文本；auto=让模型判断这条消息是否适合配图并自行调用可用的生图工具；always=尽量为每条主动消息配图。依赖你已安装的任意生图插件（向主 LLM 注册了工具），未安装则自动只发文本。"
+                    },
+                    "extra_prompt": {
+                        "description": "📝 配图引导补充（可选）",
+                        "type": "string",
+                        "default": "",
+                        "hint": "附加在配图决策提示后的额外说明，例如画风偏好。留空则仅依据消息内容自行判断。"
+                    }
+                }
+            },
             "segmented_reply_settings": {
                 "description": "🔪 分段回复设置",
                 "type": "object",
@@ -432,6 +460,34 @@
                         "type": "bool",
                         "default": true,
                         "hint": "开启后，即使 TTS 成功发送了语音，也会再发送一条纯文本原文，确保所有人都能看到内容"
+                    }
+                }
+            },
+            "image_settings": {
+                "description": "🖼️ 群聊主动消息配图设置",
+                "type": "object",
+                "items": {
+                    "mode": {
+                        "description": "🎨 配图模式",
+                        "type": "string",
+                        "options": [
+                            "off",
+                            "auto",
+                            "always"
+                        ],
+                        "default": "off",
+                        "labels": [
+                            "不生图",
+                            "Bot 自行判断",
+                            "直接生图"
+                        ],
+                        "hint": "off=只发文本；auto=让模型判断这条消息是否适合配图并自行调用可用的生图工具；always=尽量为每条主动消息配图。依赖你已安装的任意生图插件（向主 LLM 注册了工具），未安装则自动只发文本。"
+                    },
+                    "extra_prompt": {
+                        "description": "📝 配图引导补充（可选）",
+                        "type": "string",
+                        "default": "",
+                        "hint": "附加在配图决策提示后的额外说明，例如画风偏好。留空则仅依据消息内容自行判断。"
                     }
                 }
             },
