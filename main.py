@@ -18,6 +18,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from .core.chat_flow import ProactiveCoreMixin
 from .core.data_storage import StorageMixin
 from .core.llm_adapter import LlmMixin
+from .core.agent_runner import AgentRunnerMixin
 from .core.image_generator import ImageMixin
 from .core.message_events import EventsMixin
 from .core.message_sender import SenderMixin
@@ -38,6 +39,7 @@ class ProactiveChatPlugin(
     ConfigMixin,  # 配置读取与会话级配置路由
     SchedulerMixin,  # 定时任务、自动触发与沉默计时
     LlmMixin,  # 上下文准备与 LLM 调用封装
+    AgentRunnerMixin,  # 主动消息链式工具调用与模型自动回退（issue #56）
     SenderMixin,  # 主动消息发送与装饰钩子
     ImageMixin,  # 主动消息配图（工具循环 Agent 驱动任意生图插件）
     EventsMixin,  # 私聊/群聊事件监听处理

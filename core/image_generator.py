@@ -16,101 +16,18 @@
 
 from __future__ import annotations
 
-import time
-import uuid
-from typing import Any
-
 from astrbot.api import logger
+
+from .agent_runner import ProactiveAgentEvent
 
 try:
     from astrbot.core.agent.tool import ToolSet
-    from astrbot.core.message.components import Image, Plain
-    from astrbot.core.platform.astr_message_event import AstrMessageEvent
-    from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
     from astrbot.core.platform.message_session import MessageSession
-    from astrbot.core.platform.message_type import MessageType
-    from astrbot.core.platform.platform_metadata import PlatformMetadata
 
     _IMAGE_AGENT_AVAILABLE = True
 except ImportError as _e:  # pragma: no cover - 取决于宿主版本
     _IMAGE_AGENT_AVAILABLE = False
     logger.warning(f"[主动消息] 当前 AstrBot 版本不支持配图 Agent 所需组件喵: {_e}")
-
-
-# 占位符，便于在依赖缺失时仍能定义类型注解。
-_BaseEvent = AstrMessageEvent if _IMAGE_AGENT_AVAILABLE else object
-
-
-class _ImageCaptureEvent(_BaseEvent):  # type: ignore[misc, valid-type]
-    """捕获型合成事件。
-
-    参考 AstrBot 官方的 ``CronMessageEvent`` 构造一个不绑定真实平台连接的合成
-    事件，供工具循环 Agent 使用。与之不同的是：本事件重写 ``send`` ，把生图
-    插件试图发送的图片 **拦截到内部缓冲区** ，而不是真正发往平台——从而让本
-    插件能拿回图片、自行决定如何发送。
-    """
-
-    def __init__(
-        self,
-        *,
-        context: Any,
-        session: "MessageSession",
-        message: str,
-        message_type: "MessageType",
-    ) -> None:
-        platform_meta = PlatformMetadata(
-            name="proactive_image",
-            description="ProactiveChat 配图合成事件",
-            id=session.platform_id,
-        )
-
-        msg_obj = AstrBotMessage()
-        msg_obj.type = message_type
-        msg_obj.self_id = "astrbot"
-        msg_obj.session_id = session.session_id
-        msg_obj.message_id = uuid.uuid4().hex
-        msg_obj.sender = MessageMember(user_id=session.session_id, nickname="主动消息")
-        msg_obj.message = [Plain(message)]
-        msg_obj.message_str = message
-        msg_obj.raw_message = message
-        msg_obj.timestamp = int(time.time())
-
-        super().__init__(message, msg_obj, platform_meta, session.session_id)
-
-        # 使用原始会话，保证工具内部读取 unified_msg_origin 等信息时一致。
-        self.session = session
-        self.context_obj = context
-        self.is_at_or_wake_command = True
-        self.is_wake = True
-
-        # 收集被拦截的图片组件，供 Agent 结束后取用。
-        self.captured_images: list["Image"] = []
-
-    async def send(self, message: Any) -> None:
-        """拦截发送：仅收集图片组件，不真正发往平台。
-
-        兼容多种传入形式：MessageChain（含 .chain）、组件列表/元组、单个组件——
-        因为第三方生图插件调用 ``event.send`` 的写法不完全一致。
-        """
-        try:
-            if message is not None:
-                chain = getattr(message, "chain", None)
-                if chain is not None:
-                    comps = chain
-                elif isinstance(message, (list, tuple)):
-                    comps = message
-                else:
-                    comps = [message]
-                for comp in comps:
-                    if isinstance(comp, Image):
-                        self.captured_images.append(comp)
-        except Exception as e:  # noqa: BLE001 - 拦截阶段不应影响主流程
-            logger.debug(f"[主动消息] 捕获配图组件时出现异常喵: {e!r}")
-        # 故意不调用 super().send()，避免触发真实平台发送与统计。
-
-    async def send_streaming(self, generator, use_fallback: bool = False) -> None:
-        async for chain in generator:
-            await self.send(chain)
 
 
 class ImageMixin:
@@ -435,7 +352,7 @@ class ImageMixin:
             logger.info("[主动消息] 未生成配图提示词（判断无需配图），跳过配图喵。")
             return []
 
-        capture_event = _ImageCaptureEvent(
+        capture_event = ProactiveAgentEvent(
             context=context,
             session=session,
             message=text,
