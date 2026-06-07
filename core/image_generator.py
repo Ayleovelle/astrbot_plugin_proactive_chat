@@ -25,7 +25,6 @@ from astrbot.api import logger
 try:
     from astrbot.core.agent.tool import ToolSet
     from astrbot.core.message.components import Image, Plain
-    from astrbot.core.message.message_event_result import MessageChain
     from astrbot.core.platform.astr_message_event import AstrMessageEvent
     from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
     from astrbot.core.platform.message_session import MessageSession
@@ -87,11 +86,22 @@ class _ImageCaptureEvent(_BaseEvent):  # type: ignore[misc, valid-type]
         # 收集被拦截的图片组件，供 Agent 结束后取用。
         self.captured_images: list["Image"] = []
 
-    async def send(self, message: "MessageChain") -> None:
-        """拦截发送：仅收集图片组件，不真正发往平台。"""
+    async def send(self, message: Any) -> None:
+        """拦截发送：仅收集图片组件，不真正发往平台。
+
+        兼容多种传入形式：MessageChain（含 .chain）、组件列表/元组、单个组件——
+        因为第三方生图插件调用 ``event.send`` 的写法不完全一致。
+        """
         try:
-            if message and getattr(message, "chain", None):
-                for comp in message.chain:
+            if message is not None:
+                chain = getattr(message, "chain", None)
+                if chain is not None:
+                    comps = chain
+                elif isinstance(message, (list, tuple)):
+                    comps = message
+                else:
+                    comps = [message]
+                for comp in comps:
                     if isinstance(comp, Image):
                         self.captured_images.append(comp)
         except Exception as e:  # noqa: BLE001 - 拦截阶段不应影响主流程
@@ -398,6 +408,9 @@ class ImageMixin:
 
         # 取已选定（并缓存）的生图工具名；未选定则尝试选一次。
         tool_manager = context.get_llm_tool_manager()
+        if not tool_manager:
+            logger.info("[主动消息] 未找到 LLM 工具管理器，跳过配图喵。")
+            return []
         tool_names = self._ensure_image_tool_names(tool_manager, image_conf)
         if not tool_names:
             # 已选不到（或已永久回退），_ensure_image_tool_names 内已记日志。
@@ -412,13 +425,6 @@ class ImageMixin:
         if tool_set.empty():
             logger.info("[主动消息] 已选定的生图工具当前不可用，跳过配图喵。")
             return []
-
-        capture_event = _ImageCaptureEvent(
-            context=context,
-            session=session,
-            message=text,
-            message_type=session.message_type,
-        )
 
         # 第一步：由插件端先生成“画面描述”（生图提示词）。
         # auto 模式下若模型判断这条消息不适合配图，会返回空，此时直接跳过。
