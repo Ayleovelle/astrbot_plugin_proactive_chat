@@ -22,6 +22,7 @@ from typing import Any
 from astrbot.api import logger
 
 try:
+    from astrbot.core.agent.tool import ToolSet
     from astrbot.core.message.components import Image, Plain
     from astrbot.core.message.message_event_result import MessageChain
     from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -143,6 +144,157 @@ class ImageMixin:
             logger.warning(f"[主动消息] 生成主动消息配图失败，将仅发送文本喵: {e!r}")
             return []
 
+    @staticmethod
+    def _parse_name_list(raw) -> list[str]:
+        """把配置值解析为名字列表。
+
+        兼容 list 与逗号/换行分隔的字符串两种写法，去重并保持顺序。
+        """
+        names: list[str] = []
+        if isinstance(raw, str):
+            for piece in raw.replace("\n", ",").split(","):
+                piece = piece.strip()
+                if piece:
+                    names.append(piece)
+        elif isinstance(raw, (list, tuple)):
+            for item in raw:
+                piece = str(item).strip()
+                if piece:
+                    names.append(piece)
+        seen: set[str] = set()
+        result: list[str] = []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                result.append(n)
+        return result
+
+    def _select_image_tools(self, tool_manager, image_conf: dict):
+        """挑选交给 Agent 的生图工具。
+
+        规则：按关键词（工具名 + 描述）自动识别生图工具；再叠加用户配置的
+        extra_tools（强制补充，即使不含关键词）与 exclude_tools（强制排除）。
+        返回一个 ToolSet（可能为空）。
+        """
+        extra = set(self._parse_name_list((image_conf or {}).get("extra_tools", [])))
+        exclude = set(self._parse_name_list((image_conf or {}).get("exclude_tools", [])))
+
+        try:
+            all_tools = list(getattr(tool_manager, "func_list", []) or [])
+        except Exception:  # noqa: BLE001
+            all_tools = []
+
+        tool_set = ToolSet()
+        for tool in all_tools:
+            name = getattr(tool, "name", "") or ""
+            if name in exclude:
+                continue
+            desc = getattr(tool, "description", "") or ""
+            hit_keyword = self._looks_like_image_tool(name, desc)
+            if hit_keyword or name in extra:
+                tool_set.add_tool(tool)
+
+        # extra 里指向但上面没收进来的（理论上已收，双保险按名字补一次）
+        for name in extra:
+            if tool_set.get_tool(name) is None and name not in exclude:
+                t = tool_manager.get_func(name) if hasattr(tool_manager, "get_func") else None
+                if t is not None:
+                    tool_set.add_tool(t)
+        return tool_set
+
+    # 生图相关关键词（小写）。命中工具名或描述即视为候选生图工具。
+    # 视频类（video）刻意不收，避免把视频生成工具当配图。
+    _IMAGE_KEYWORDS = (
+        "draw", "image", "paint", "pic", "photo", "illustr", "t2i", "text2image",
+        "text-to-image", "stable", "diffusion", "midjourney", "dalle", "dall-e",
+        "flux", "comfyui", "render",
+        "生图", "绘图", "绘画", "画图", "配图", "图片", "作画", "出图", "画一", "生成图",
+    )
+    # 强生图信号：命中负向词后，只要工具名或描述里出现这些词，仍判定为生图工具。
+    _IMAGE_STRONG = (
+        "draw", "paint", "t2i", "text2image", "text-to-image",
+        "generate image", "generate an image", "image generation",
+        "生图", "绘图", "绘画", "绘制", "画图", "作画", "配图",
+        "生成图片", "生成一张", "画一张", "画一幅",
+    )
+    # 明显非生图但可能含 image 字样的工具，关键词命中后再排除一层。
+    _IMAGE_NEGATIVE = (
+        "read", "ocr", "recogn", "识别", "video", "视频", "understand", "analy", "描述图",
+    )
+
+    @classmethod
+    def _looks_like_image_tool(cls, name: str, description: str) -> bool:
+        """按关键词判断一个工具是否像“文生图”工具。
+
+        名字与描述双线匹配：任一命中生图关键词即为候选；命中负向词时，
+        只要名字或描述里仍出现强生图信号，依然保留。
+        """
+        haystack = f"{name} {description}".lower()
+        if not any(kw in haystack for kw in cls._IMAGE_KEYWORDS):
+            return False
+        # 命中负向词时，要求名字或描述里带强生图信号才保留，否则排除。
+        if any(neg in haystack for neg in cls._IMAGE_NEGATIVE):
+            return any(s in haystack for s in cls._IMAGE_STRONG)
+        return True
+
+    # 选不到生图工具的最大累计次数，超过则本次运行内永久回退为纯文本。
+    _IMAGE_TOOLS_MAX_ATTEMPTS = 3
+
+    def _ensure_image_tool_names(self, tool_manager, image_conf: dict) -> list[str]:
+        """返回已选定并缓存的生图工具名；未选定则尝试选一次。
+
+        - 一旦成功选定就缓存，后续直接复用，不再扫描。
+        - 累计选不到达到上限后永久回退（本次运行内不再尝试）。
+        """
+        if getattr(self, "_image_tools_disabled", False):
+            return []
+        if getattr(self, "_image_tools_selected", False):
+            return list(self._image_tools_cache)
+
+        tool_set = self._select_image_tools(tool_manager, image_conf)
+        names = [t.name for t in tool_set.tools] if tool_set else []
+        if names:
+            self._image_tools_cache = names
+            self._image_tools_selected = True
+            logger.info("[主动消息] 已找到可用的生图工具喵。")
+            return list(names)
+
+        # 没选到：累计计数，达到上限则永久回退。
+        self._image_tools_attempts = getattr(self, "_image_tools_attempts", 0) + 1
+        if self._image_tools_attempts >= self._IMAGE_TOOLS_MAX_ATTEMPTS:
+            self._image_tools_disabled = True
+            logger.info(
+                "[主动消息] 多次未找到可用生图工具喵，已回退为不生图模式（本次运行内不再尝试）。"
+            )
+        else:
+            logger.info("[主动消息] 暂未找到可用的生图工具喵，稍后重试。")
+        return []
+
+    async def prewarm_image_tools(self) -> None:
+        """插件加载/空闲时预选一次生图工具，避免发送时才扫描。
+
+        加载阶段生图插件可能尚未就绪，选不到属正常，不计入失败次数。
+        """
+        if not _IMAGE_AGENT_AVAILABLE:
+            return
+        if getattr(self, "_image_tools_selected", False) or getattr(
+            self, "_image_tools_disabled", False
+        ):
+            return
+        try:
+            tool_manager = self.context.get_llm_tool_manager()
+        except Exception:  # noqa: BLE001
+            return
+        # 预热用空配置即可（extra/exclude 在真正发送时按会话配置再算）；
+        # 这里只为尽早把“有没有生图工具”探明并缓存。
+        tool_set = self._select_image_tools(tool_manager, {})
+        names = [t.name for t in tool_set.tools] if tool_set else []
+        if names:
+            self._image_tools_cache = names
+            self._image_tools_selected = True
+            logger.info("[主动消息] 已找到可用的生图工具喵。")
+        # 预热选不到不记失败、不打 warning，留给发送时按需重试。
+
     async def _run_image_agent(
         self, session_id: str, text: str, image_conf: dict, mode: str
     ) -> list:
@@ -158,11 +310,21 @@ class ImageMixin:
             logger.info("[主动消息] 未找到可用对话 provider，跳过配图喵。")
             return []
 
-        # 汇集全部已注册的 LLM 工具（包含用户安装的任意生图插件的工具）。
+        # 取已选定（并缓存）的生图工具名；未选定则尝试选一次。
         tool_manager = context.get_llm_tool_manager()
-        tool_set = tool_manager.get_full_tool_set()
-        if tool_set is None or tool_set.empty():
-            logger.info("[主动消息] 未发现任何可用的 LLM 工具（如生图插件），跳过配图喵。")
+        tool_names = self._ensure_image_tool_names(tool_manager, image_conf)
+        if not tool_names:
+            # 已选不到（或已永久回退），_ensure_image_tool_names 内已记日志。
+            return []
+
+        # 用缓存的工具名重建本次调用的 ToolSet。
+        tool_set = ToolSet()
+        for name in tool_names:
+            tool = tool_manager.get_func(name)
+            if tool is not None:
+                tool_set.add_tool(tool)
+        if tool_set.empty():
+            logger.info("[主动消息] 已选定的生图工具当前不可用，跳过配图喵。")
             return []
 
         capture_event = _ImageCaptureEvent(

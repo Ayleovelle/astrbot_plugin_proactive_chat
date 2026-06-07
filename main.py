@@ -100,6 +100,11 @@ class ProactiveChatPlugin(
             str, dict
         ] = {}  # 临时态（如群聊最后用户发言时间）
         self.last_message_times: dict[str, float] = {}  # 会话最近消息时间，用于触发判断
+        # 配图工具选择缓存：避免每次发送都扫描全部工具。
+        self._image_tools_cache: list[str] = []  # 已选定的生图工具名
+        self._image_tools_selected: bool = False  # 是否已成功选定
+        self._image_tools_attempts: int = 0  # 累计选不到的次数
+        self._image_tools_disabled: bool = False  # 连续 3 次选不到后永久回退
         self.auto_trigger_timers: dict[
             str, asyncio.TimerHandle
         ] = {}  # 自动触发计时器句柄

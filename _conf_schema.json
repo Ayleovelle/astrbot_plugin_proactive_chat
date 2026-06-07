@@ -183,6 +183,18 @@
                         "type": "string",
                         "default": "",
                         "hint": "附加在配图决策提示后的额外说明，例如画风偏好。留空则仅依据消息内容自行判断。"
+                    },
+                    "extra_tools": {
+                        "description": "➕ 额外生图工具名（可选）",
+                        "type": "list",
+                        "default": [],
+                        "hint": "默认会按关键词（draw/image/生图/绘图 等，匹配工具名与描述）自动识别生图工具。如果你的生图插件工具名不含这些关键词（例如 nano_banana、flux），在这里补上它的 LLM 工具名，每行一个。"
+                    },
+                    "exclude_tools": {
+                        "description": "➖ 排除的工具名（可选）",
+                        "type": "list",
+                        "default": [],
+                        "hint": "如果自动识别误把某个非生图工具当成了生图工具（例如 read_image_file 这类），在这里填它的名字排除掉，每行一个。"
                     }
                 }
             },
@@ -488,6 +500,18 @@
                         "type": "string",
                         "default": "",
                         "hint": "附加在配图决策提示后的额外说明，例如画风偏好。留空则仅依据消息内容自行判断。"
+                    },
+                    "extra_tools": {
+                        "description": "➕ 额外生图工具名（可选）",
+                        "type": "list",
+                        "default": [],
+                        "hint": "默认会按关键词（draw/image/生图/绘图 等，匹配工具名与描述）自动识别生图工具。如果你的生图插件工具名不含这些关键词（例如 nano_banana、flux），在这里补上它的 LLM 工具名，每行一个。"
+                    },
+                    "exclude_tools": {
+                        "description": "➖ 排除的工具名（可选）",
+                        "type": "list",
+                        "default": [],
+                        "hint": "如果自动识别误把某个非生图工具当成了生图工具（例如 read_image_file 这类），在这里填它的名字排除掉，每行一个。"
                     }
                 }
             },

@@ -149,6 +149,22 @@ class LifecycleMixin:
                     )
                 )
 
+        # 预热配图工具：延迟少许，等其它生图插件也加载完成后再探测一次，
+        # 避免主动消息发送时才扫描工具。选不到不影响主流程。
+        prewarm = getattr(self, "prewarm_image_tools", None)
+        if callable(prewarm):
+            async def _deferred_prewarm_image_tools() -> None:
+                try:
+                    await asyncio.sleep(5)
+                    await prewarm()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"[主动消息] 预热配图工具时出现异常喵: {e!r}")
+
+            try:
+                asyncio.create_task(_deferred_prewarm_image_tools())
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[主动消息] 启动配图工具预热任务失败喵: {e!r}")
+
     async def terminate(self) -> None:
         """插件被卸载或停用时调用的清理函数。"""
         logger.info("[主动消息] 收到插件终止指令，开始清理资源喵。")
