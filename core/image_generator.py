@@ -102,20 +102,6 @@ class _ImageCaptureEvent(_BaseEvent):  # type: ignore[misc, valid-type]
             await self.send(chain)
 
 
-# 引导模型决定是否配图的系统提示。
-_AUTO_SYSTEM_PROMPT = (
-    "你刚刚生成了一条要主动发给用户的消息。现在请判断这条消息是否适合配一张图片。\n"
-    "- 如果适合（例如描述了某个画面、场景、物品、表情、心情且配图能增强表达），"
-    "请调用一个可用的生图工具来生成与消息内容相符的图片。\n"
-    "- 如果不适合（例如纯粹的问候、提问、抽象表达），则不要调用任何工具，直接结束。\n"
-    "不要输出多余的解释，只在需要时调用生图工具。"
-)
-_ALWAYS_SYSTEM_PROMPT = (
-    "你刚刚生成了一条要主动发给用户的消息。请调用一个可用的生图工具，生成一张"
-    "与这条消息内容相符的配图。请直接调用工具，不要输出多余解释。"
-)
-
-
 class ImageMixin:
     """为主动消息提供“配图”能力的 Mixin。"""
 
@@ -295,6 +281,53 @@ class ImageMixin:
             logger.info("[主动消息] 已找到可用的生图工具喵。")
         # 预热选不到不记失败、不打 warning，留给发送时按需重试。
 
+    # auto 模式下，模型判断无需配图时回复的固定标记。
+    _NO_IMAGE_TOKEN = "NO_IMAGE"
+
+    async def _generate_image_prompt(
+        self, provider_id: str, text: str, image_conf: dict, mode: str
+    ) -> str:
+        """由插件端调用 LLM，把主动消息文本转成一段“画面描述”（生图提示词）。
+
+        - always 模式：总是生成一段画面描述。
+        - auto 模式：先让模型判断是否适合配图，不适合则返回空字符串。
+        失败一律返回空字符串（跳过配图，不影响文本）。
+        """
+        extra = str((image_conf or {}).get("extra_prompt", "") or "").strip()
+        if mode == "always":
+            system_prompt = (
+                "你是配图提示词助手。请根据给定的消息内容，写出一段适合用来生图的"
+                "画面描述（中文或英文均可），聚焦可视画面：主体、场景、氛围、风格。"
+                "只输出画面描述本身，不要解释、不要加引号。"
+            )
+        else:
+            system_prompt = (
+                "你是配图提示词助手。请判断给定的消息是否适合配一张图片：\n"
+                f"- 不适合（如纯问候、提问、抽象表达）：只回复 {self._NO_IMAGE_TOKEN}。\n"
+                "- 适合：写出一段适合用来生图的画面描述（聚焦主体、场景、氛围、风格），"
+                "只输出画面描述本身，不要解释、不要加引号。"
+            )
+        if extra:
+            system_prompt = f"{system_prompt}\n补充要求：{extra}"
+
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=f"消息内容：\n{text}",
+                system_prompt=system_prompt,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[主动消息] 生成配图提示词失败喵: {e!r}")
+            return ""
+
+        prompt = (getattr(resp, "completion_text", "") or "").strip()
+        if not prompt:
+            return ""
+        # auto 模式下命中“无需配图”标记则跳过。
+        if mode != "always" and self._NO_IMAGE_TOKEN in prompt.upper():
+            return ""
+        return prompt
+
     async def _run_image_agent(
         self, session_id: str, text: str, image_conf: dict, mode: str
     ) -> list:
@@ -334,11 +367,30 @@ class ImageMixin:
             message_type=session.message_type,
         )
 
-        base_prompt = _ALWAYS_SYSTEM_PROMPT if mode == "always" else _AUTO_SYSTEM_PROMPT
-        extra = str(image_conf.get("extra_prompt", "") or "").strip()
-        system_prompt = f"{base_prompt}\n\n{extra}" if extra else base_prompt
+        # 第一步：由插件端先生成“画面描述”（生图提示词）。
+        # auto 模式下若模型判断这条消息不适合配图，会返回空，此时直接跳过。
+        image_prompt = await self._generate_image_prompt(
+            provider_id, text, image_conf, mode
+        )
+        if not image_prompt:
+            logger.info("[主动消息] 未生成配图提示词（判断无需配图），跳过配图喵。")
+            return []
 
-        user_prompt = f"这是要发送的主动消息内容：\n{text}"
+        capture_event = _ImageCaptureEvent(
+            context=context,
+            session=session,
+            message=text,
+            message_type=session.message_type,
+        )
+
+        # 第二步：把插件生成好的画面描述作为明确指令交给 Agent，让它据此调用生图
+        # 工具——描述由插件掌控，要求模型原样使用、不要改写或自行编造。
+        system_prompt = (
+            "你的唯一任务是调用一个可用的生图工具，为下面给出的画面描述生成图片。\n"
+            "请把画面描述原样作为生图工具的绘画提示词，不要改写、缩写或自行发挥；\n"
+            "调用工具即可，不要输出多余文字。"
+        )
+        user_prompt = f"画面描述：\n{image_prompt}"
 
         await context.tool_loop_agent(
             event=capture_event,
@@ -353,5 +405,5 @@ class ImageMixin:
         if images:
             logger.info(f"[主动消息] 配图 Agent 共捕获 {len(images)} 张图片喵。")
         else:
-            logger.info("[主动消息] 配图 Agent 未产出图片（模型判断无需配图或工具未生图）喵。")
+            logger.info("[主动消息] 配图 Agent 未产出图片（工具未生图或调用失败）喵。")
         return images
