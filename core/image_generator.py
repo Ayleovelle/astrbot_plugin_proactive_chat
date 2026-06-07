@@ -1,14 +1,15 @@
 """主动消息配图能力。
 
-通过 AstrBot 的工具循环 Agent，让主 LLM 在生成主动消息后自行判断/调用
-任意已安装的生图插件（向主 LLM 注册了工具的插件）来生成配图。生成的图片
-不会由生图插件直接发往平台，而是被一个“捕获型”合成事件拦截、收集后交还给
-本插件，统一走主动消息既有的发送流程（分段、装饰钩子、平台历史持久化）。
+通过 AstrBot 的工具循环 Agent，让主 LLM 调用已安装的生图插件（向主 LLM
+注册了工具的插件）来生成配图。生成的图片不会由生图插件直接发往平台，而是被一个
+“捕获型”合成事件拦截、收集后交还给本插件，统一走主动消息既有的发送流程
+（分段、装饰钩子、平台历史持久化）。
 
 设计要点：
-- provider 无关：不绑定任何特定生图插件，依赖 ``get_full_tool_set`` 暴露的
-  全部已注册工具，由模型自行选择。
-- 不改动 AstrBot 源码：仅继承公开基类、调用公开 API。
+- provider 无关：不绑定任何特定生图插件，按关键词（工具名 + 描述）自动识别生图
+  工具，并支持用户用 extra_tools 补充、exclude_tools 排除。
+- 提示词由插件端生成：先由插件调用 LLM 生成画面描述，再交给 Agent 据此调用生图
+  工具，而非让模型在工具循环里自行编写提示词。
 - 失败静默降级：任何环节出错都只记录日志、回退为纯文本，绝不把错误信息塞进
   发送给用户的消息内容。
 """
@@ -163,7 +164,9 @@ class ImageMixin:
         返回一个 ToolSet（可能为空）。
         """
         extra = set(self._parse_name_list((image_conf or {}).get("extra_tools", [])))
-        exclude = set(self._parse_name_list((image_conf or {}).get("exclude_tools", [])))
+        exclude = set(
+            self._parse_name_list((image_conf or {}).get("exclude_tools", []))
+        )
 
         try:
             all_tools = list(getattr(tool_manager, "func_list", []) or [])
@@ -183,7 +186,11 @@ class ImageMixin:
         # extra 里指向但上面没收进来的（理论上已收，双保险按名字补一次）
         for name in extra:
             if tool_set.get_tool(name) is None and name not in exclude:
-                t = tool_manager.get_func(name) if hasattr(tool_manager, "get_func") else None
+                t = (
+                    tool_manager.get_func(name)
+                    if hasattr(tool_manager, "get_func")
+                    else None
+                )
                 if t is not None:
                     tool_set.add_tool(t)
         return tool_set
@@ -191,21 +198,67 @@ class ImageMixin:
     # 生图相关关键词（小写）。命中工具名或描述即视为候选生图工具。
     # 视频类（video）刻意不收，避免把视频生成工具当配图。
     _IMAGE_KEYWORDS = (
-        "draw", "image", "paint", "pic", "photo", "illustr", "t2i", "text2image",
-        "text-to-image", "stable", "diffusion", "midjourney", "dalle", "dall-e",
-        "flux", "comfyui", "render",
-        "生图", "绘图", "绘画", "画图", "配图", "图片", "作画", "出图", "画一", "生成图",
+        "draw",
+        "image",
+        "paint",
+        "pic",
+        "photo",
+        "illustr",
+        "t2i",
+        "text2image",
+        "text-to-image",
+        "stable",
+        "diffusion",
+        "midjourney",
+        "dalle",
+        "dall-e",
+        "flux",
+        "comfyui",
+        "render",
+        "生图",
+        "绘图",
+        "绘画",
+        "画图",
+        "配图",
+        "图片",
+        "作画",
+        "出图",
+        "画一",
+        "生成图",
     )
     # 强生图信号：命中负向词后，只要工具名或描述里出现这些词，仍判定为生图工具。
     _IMAGE_STRONG = (
-        "draw", "paint", "t2i", "text2image", "text-to-image",
-        "generate image", "generate an image", "image generation",
-        "生图", "绘图", "绘画", "绘制", "画图", "作画", "配图",
-        "生成图片", "生成一张", "画一张", "画一幅",
+        "draw",
+        "paint",
+        "t2i",
+        "text2image",
+        "text-to-image",
+        "generate image",
+        "generate an image",
+        "image generation",
+        "生图",
+        "绘图",
+        "绘画",
+        "绘制",
+        "画图",
+        "作画",
+        "配图",
+        "生成图片",
+        "生成一张",
+        "画一张",
+        "画一幅",
     )
     # 明显非生图但可能含 image 字样的工具，关键词命中后再排除一层。
     _IMAGE_NEGATIVE = (
-        "read", "ocr", "recogn", "识别", "video", "视频", "understand", "analy", "描述图",
+        "read",
+        "ocr",
+        "recogn",
+        "识别",
+        "video",
+        "视频",
+        "understand",
+        "analy",
+        "描述图",
     )
 
     @classmethod

@@ -153,6 +153,7 @@ class LifecycleMixin:
         # 避免主动消息发送时才扫描工具。选不到不影响主流程。
         prewarm = getattr(self, "prewarm_image_tools", None)
         if callable(prewarm):
+
             async def _deferred_prewarm_image_tools() -> None:
                 try:
                     await asyncio.sleep(5)
