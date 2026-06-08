@@ -309,7 +309,7 @@ class AgentRunnerMixin:
                 if selected is not None and not selected.empty():
                     tool_set = selected
                     logger.info(
-                        f"[主动消息] 链式工具调用已启用，共暴露 {len(tool_set.func_list)} 个工具喵。"
+                        f"[主动消息] 链式工具调用已启用，共暴露 {len(tool_set.tools)} 个工具喵。"
                     )
                 else:
                     logger.info(
@@ -330,7 +330,7 @@ class AgentRunnerMixin:
 
         # max_steps：0（或缺省/非法）表示自动——按本次暴露的工具数推导一个上限；
         # 填正数则视为用户指定的固定上限。
-        tool_count = len(tool_set.func_list) if tool_set is not None else 0
+        tool_count = len(tool_set.tools) if tool_set is not None else 0
         max_steps = self._compute_max_steps(
             (agent_conf or {}).get("max_steps", 0), tool_count
         )
