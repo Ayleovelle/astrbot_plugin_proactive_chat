@@ -7,6 +7,7 @@ import json
 import math
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -33,6 +34,10 @@ except ImportError:
     logger.warning(
         "[主动消息] FastAPI 未安装喵，Web 管理端不可用喵。请安装: pip install fastapi uvicorn"
     )
+
+
+# 端口被占用时，从配置端口起向后顺序探测备用端口的最大次数。
+_PORT_FALLBACK_MAX_ATTEMPTS = 20
 
 
 def _is_running_in_docker() -> bool:
@@ -1259,6 +1264,45 @@ class WebAdminServer:
         }
         await self._broadcast_ws_payload(payload)
 
+    def _is_port_available(self, host: str, port: int) -> bool:
+        """探测目标端口当前是否可绑定。
+
+        与 Uvicorn / asyncio 在 Windows 上的绑定行为保持一致：刻意不设置
+        SO_REUSEADDR，因为 Windows 下该选项会允许重复绑定已被占用的端口，
+        从而导致预检误判为“可用”。
+        """
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        probe = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            probe.bind((host, port))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
+    def _resolve_bind_port(self, host: str, port: int) -> int | None:
+        """绑定前预检端口，必要时顺序尝试备用端口。
+
+        Uvicorn 在绑定失败时会调用 sys.exit(1) 抛出 SystemExit，
+        虽已在 _serve 中兜底拦截，但能提前发现即可避免一次无谓的失败启动。
+
+        Returns:
+            可用的端口号；若主端口被占用且向后探测均失败，则返回 None。
+        """
+        if self._is_port_available(host, port):
+            return port
+
+        logger.warning(f"[主动消息] Web 管理端端口 {host}:{port} 已被占用喵。")
+        for offset in range(1, _PORT_FALLBACK_MAX_ATTEMPTS + 1):
+            candidate = port + offset
+            if candidate > 65535:
+                break
+            if self._is_port_available(host, candidate):
+                logger.warning(f"[主动消息] 已自动改用备用端口 {host}:{candidate} 喵。")
+                return candidate
+        return None
+
     async def start(self) -> None:
         if not FASTAPI_AVAILABLE:
             logger.error("[主动消息] 无法启动 Web 管理端喵: FastAPI 未安装")
@@ -1282,7 +1326,19 @@ class WebAdminServer:
             return
 
         host = web_admin.get("host", "127.0.0.1")
-        port = int(web_admin.get("port", 4100))
+        configured_port = int(web_admin.get("port", 4100))
+
+        # 绑定前先做端口预检，尽量把“端口被占用”这一可预期故障挡在 Uvicorn
+        # 内部 sys.exit(1) 之前，避免热重载期间出现失败启动。
+        port = self._resolve_bind_port(host, configured_port)
+        if port is None:
+            logger.error(
+                f"[主动消息] Web 管理端启动失败喵: 端口 {host}:{configured_port} "
+                f"不可用（已向后探测 {_PORT_FALLBACK_MAX_ATTEMPTS} 个端口）。"
+                "本次仅 Web 管理端不可用，主动消息插件主体功能不受影响；"
+                "请修改 web_admin.port，或释放该端口后重试。"
+            )
+            return
 
         # 采用 Uvicorn 内嵌启动，便于作为插件内部协程任务运行。
         uv_cfg = uvicorn.Config(
@@ -1301,9 +1357,6 @@ class WebAdminServer:
                 # 正常停止时会取消该任务，需放行以保持取消语义。
                 raise
             except (SystemExit, Exception) as e:
-                # Uvicorn 绑定端口失败会调用 sys.exit() 抛出 SystemExit（属
-                # BaseException 而非 Exception），若不在此拦截，该异常会作为未
-                # 检索的任务异常冒泡到事件循环根部，拖垮整个 AstrBot 进程。
                 # 这里显式只拦 SystemExit 与 Exception，不波及 KeyboardInterrupt。
                 logger.exception(f"[主动消息] Web 管理端运行异常喵: {e!r}")
 
@@ -1327,33 +1380,50 @@ class WebAdminServer:
         if self._auth_enabled:
             self._token_cleanup_task = asyncio.create_task(_cleanup_tokens_loop())
 
-        # 略等一个事件循环切片，让服务有机会完成绑定后再打印启动日志。
-        await asyncio.sleep(0.1)
-        logger.info(f"[主动消息] Web 管理端已启动喵: http://{host}:{port}")
+        # 轮询等待绑定结果（最多约 1 秒），据此区分“启动成功”与“绑定失败”。
+        for _ in range(20):
+            if self.server.started or self.server_task.done():
+                break
+            await asyncio.sleep(0.05)
+
+        if self.server.started:
+            logger.info(f"[主动消息] Web 管理端已启动喵: http://{host}:{port}")
+        else:
+            logger.error(
+                f"[主动消息] Web 管理端启动失败喵: 端口 {host}:{port} 绑定未成功"
+                "（可能被其他程序抢占）。本次仅 Web 管理端不可用，"
+                "主动消息插件主体功能不受影响。"
+            )
 
     async def stop(self) -> None:
         if self._token_cleanup_task:
             self._token_cleanup_task.cancel()
+            self._token_cleanup_task = None
         if self.server:
             # 通知 Uvicorn 进入优雅退出流程。
             self.server.should_exit = True
-            # 强制退出：避免存在未关闭的长连接（如 WebSocket）时优雅关闭
-            # 永久挂起，确保监听 socket 能被释放，防止热重载时端口冲突。
+            # 强制退出：避免存在未关闭的长连接（如 WebUI 的 WebSocket）时优雅
+            # 关闭永久挂起，确保监听 socket 能被释放，防止热重载端口冲突。
+            # 注意：force_exit 会同时跳过 lifespan.shutdown()（uvicorn 行为），
+            # 故本应用不得注册依赖 lifespan 的清理逻辑，否则会被静默跳过。
             self.server.force_exit = True
 
         if self.server_task:
+            task = self.server_task
+            # 先摘掉引用，避免 stop 期间被并发的 start 覆盖或重复等待同一任务。
+            self.server_task = None
             try:
                 # 最多等待 5 秒，避免插件卸载时无限阻塞。
-                await asyncio.wait_for(self.server_task, timeout=5)
+                await asyncio.wait_for(task, timeout=5)
             except asyncio.TimeoutError:
                 logger.warning(
                     "[主动消息] Web 管理端未在 5 秒内停止喵，正在强制取消以释放端口。"
                 )
-                self.server_task.cancel()
+                task.cancel()
                 # 等待取消真正完成，确保 stop 返回前监听 socket 已释放，
                 # 避免热重载时新实例绑定同端口失败。
                 try:
-                    await self.server_task
+                    await task
                 except (asyncio.CancelledError, Exception):
                     pass
             except Exception as e:
