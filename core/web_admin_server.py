@@ -1267,13 +1267,14 @@ class WebAdminServer:
     def _is_port_available(self, host: str, port: int) -> bool:
         """探测目标端口当前是否可绑定。
 
-        与 Uvicorn / asyncio 在 Windows 上的绑定行为保持一致：刻意不设置
-        SO_REUSEADDR，因为 Windows 下该选项会允许重复绑定已被占用的端口，
-        从而导致预检误判为“可用”。
+        探测必须完整复刻 Uvicorn 的实际绑定路径，否则会误判
         """
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         probe = socket.socket(family, socket.SOCK_STREAM)
         try:
+            if os.name == "posix":
+                # 与 asyncio.create_server 在 POSIX 上的默认行为保持一致。
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind((host, port))
             return True
         except OSError:
@@ -1281,19 +1282,28 @@ class WebAdminServer:
         finally:
             probe.close()
 
-    def _resolve_bind_port(self, host: str, port: int) -> int | None:
-        """绑定前预检端口，必要时顺序尝试备用端口。
+    def _resolve_bind_port(
+        self,
+        host: str,
+        port: int,
+        *,
+        allow_fallback: bool,
+    ) -> int | None:
+        """绑定前预检端口；allow_fallback 为真时顺序尝试备用端口。
 
         Uvicorn 在绑定失败时会调用 sys.exit(1) 抛出 SystemExit，
         虽已在 _serve 中兜底拦截，但能提前发现即可避免一次无谓的失败启动。
 
         Returns:
-            可用的端口号；若主端口被占用且向后探测均失败，则返回 None。
+            可用的端口号；若主端口被占用且不允许（或找不到）备用端口，则返回 None。
         """
         if self._is_port_available(host, port):
             return port
 
         logger.warning(f"[主动消息] Web 管理端端口 {host}:{port} 已被占用喵。")
+        if not allow_fallback:
+            return None
+
         for offset in range(1, _PORT_FALLBACK_MAX_ATTEMPTS + 1):
             candidate = port + offset
             if candidate > 65535:
@@ -1330,11 +1340,23 @@ class WebAdminServer:
 
         # 绑定前先做端口预检，尽量把“端口被占用”这一可预期故障挡在 Uvicorn
         # 内部 sys.exit(1) 之前，避免热重载期间出现失败启动。
-        port = self._resolve_bind_port(host, configured_port)
+        # 容器环境下禁用端口漂移：容器通常只对外发布配置端口这一处映射，
+        # 若自动改用备用端口，WebUI 将因映射缺失而无法访问，故只预检不迁移。
+        in_docker = _is_running_in_docker()
+        port = self._resolve_bind_port(
+            host,
+            configured_port,
+            allow_fallback=not in_docker,
+        )
         if port is None:
+            reason = (
+                "容器环境下为避免端口映射失效不会自动改用备用端口，"
+                if in_docker
+                else f"已向后探测 {_PORT_FALLBACK_MAX_ATTEMPTS} 个端口仍不可用，"
+            )
             logger.error(
                 f"[主动消息] Web 管理端启动失败喵: 端口 {host}:{configured_port} "
-                f"不可用（已向后探测 {_PORT_FALLBACK_MAX_ATTEMPTS} 个端口）。"
+                f"不可用；{reason}"
                 "本次仅 Web 管理端不可用，主动消息插件主体功能不受影响；"
                 "请修改 web_admin.port，或释放该端口后重试。"
             )
@@ -1388,11 +1410,18 @@ class WebAdminServer:
 
         if self.server.started:
             logger.info(f"[主动消息] Web 管理端已启动喵: http://{host}:{port}")
-        else:
+        elif self.server_task.done():
+            # 任务已结束却未 started，说明是真实的绑定失败。
             logger.error(
                 f"[主动消息] Web 管理端启动失败喵: 端口 {host}:{port} 绑定未成功"
                 "（可能被其他程序抢占）。本次仅 Web 管理端不可用，"
                 "主动消息插件主体功能不受影响。"
+            )
+        else:
+            # 任务仍在运行，仅是本轮轮询超时，不能断言失败，避免误导排障。
+            logger.warning(
+                f"[主动消息] Web 管理端仍在启动中喵: http://{host}:{port} "
+                "（等待超时，稍后可能自行就绪）。"
             )
 
     async def stop(self) -> None:
