@@ -225,6 +225,27 @@ class SenderMixin:
         return build_proactive_event_for_session(plugin=self, session_id=session_id)
 
     @staticmethod
+    def _mark_event_send_failed(event: Any) -> None:
+        """在事件支持时同步发送失败标记，保证标记与实际结果一致。"""
+        if event is None:
+            return
+        try:
+            if hasattr(event, "proactive_send_failed"):
+                event.proactive_send_failed = True
+        except Exception:  # pragma: no cover - 未知事件实现
+            pass
+
+    @staticmethod
+    def _mark_event_sent(event: Any) -> None:
+        """在事件支持时同步“已有发送操作”标记，供依赖该标志的插件使用。"""
+        if event is None:
+            return
+        try:
+            event._has_send_oper = True  # noqa: SLF001 - 与官方事件语义对齐
+        except Exception:  # pragma: no cover - 未知事件实现
+            pass
+
+    @staticmethod
     def _safe_is_stopped(event: Any) -> bool:
         """安全读取事件终止标志，兼容缺少该方法的旧实现。"""
         try:
@@ -466,8 +487,15 @@ class SenderMixin:
                 # 因此这里不再重复补写，避免同一条消息被写入两次。
                 sent = await event.send(chain)
             except Exception as e:
-                logger.error(f"[主动消息] 事件发送失败喵，回退平台直发: {e}")
-                sent = False
+                # 仅“抛出异常”才回退直发：此时送达状态未知
+                # （可能已投递但响应超时），值得再用直发路径尝试一次。
+                logger.error(f"[主动消息] 事件发送异常喵，回退平台直发: {e}")
+                sent_direct = await self._send_chain_direct(session_id, components)
+                if sent_direct:
+                    self._mark_event_sent(event)
+                else:
+                    self._mark_event_send_failed(event)
+                return sent_direct
 
             if sent is True:
                 return True
@@ -478,6 +506,13 @@ class SenderMixin:
                     session_id, chain
                 )
                 return True
+
+            # sent is False：事件实现内部已依次尝试平台直发与核心 API 兜底，
+            # 两者均未成功。此处不能再调用 _send_chain_direct，否则会对同一平台
+            # 重放 send_by_session 与核心 API 请求。
+            self._mark_event_send_failed(event)
+            logger.error("[主动消息] 事件发送与核心 API 兜底均未送达，不再重复尝试喵。")
+            return False
 
         return await self._send_chain_direct(session_id, components)
 
@@ -564,24 +599,20 @@ class SenderMixin:
         any_sent = is_tts_sent
 
         if should_send_text:
-            # 构造初始消息链
-            # 关键：Provider 的 result_chain 是“文本 + 媒体”的完整载体，
-            # 且 LLMResponse.completion_text 正是派生自该链的 Plain 组件，
-            # 因此只要存在链就必须以链为起点
+            # 构造初始消息链。
+            # Provider 的 result_chain 是“文本 + 媒体”的完整载体，必须以其为起点，
+            # 否则“文本 + 图片”这类结果会因文本非空而只发送文本、丢弃媒体。
             base_components: list = list(initial_chain) if initial_chain else []
 
-            # 链中缺少文本组件时，用纯文本补一个首段，保证装饰器能看到完整内容。
+            # LLMResponse.completion_text 由链内“全部”Plain 组件
+            # 拼接而成，因此链本身即是文本的权威来源。
+            # - 链中已有 Plain 时直接采用该链，既不做覆盖也不原地改写上游的组件对象；
+            # - 仅当链中完全没有 Plain、但存在独立文本时，才补入一个文本首段，让装饰器能看到完整内容。
             text_value = text.strip()
-            if text_value:
-                has_plain = any(isinstance(comp, Plain) for comp in base_components)
-                if has_plain:
-                    # 用生成文本覆盖链中首段 Plain，避免与链内文本重复发送。
-                    for index, comp in enumerate(base_components):
-                        if isinstance(comp, Plain):
-                            comp.text = text_value
-                            break
-                else:
-                    base_components.insert(0, Plain(text=text_value))
+            if text_value and not any(
+                isinstance(comp, Plain) for comp in base_components
+            ):
+                base_components.insert(0, Plain(text=text_value))
 
             # 步骤一：对完整消息链执行装饰，让装饰器看到完整文本。
             # 装饰钩子可终止事件（如内容审核拦截），此时必须放弃发送与记账。
