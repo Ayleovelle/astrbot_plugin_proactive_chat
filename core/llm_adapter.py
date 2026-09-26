@@ -37,6 +37,24 @@ except ImportError:  # pragma: no cover
     EventType = None  # type: ignore[assignment]
 
 
+def _provider_request_fields() -> set[str] | None:
+    """探测 ProviderRequest 支持的字段名。
+
+    以 dataclass 定义为准来判定字段可用性，而不是“构造失败后逐个剔除再重试”。
+
+    Returns:
+        支持的字段名集合；无法探测（非 dataclass）时返回 None。
+    """
+    try:
+        import dataclasses
+
+        if not dataclasses.is_dataclass(ProviderRequest):
+            return None
+        return {field.name for field in dataclasses.fields(ProviderRequest)}
+    except Exception:  # pragma: no cover - 防御性兜底
+        return None
+
+
 class LlmMixin:
     """上下文获取与 LLM 调用相关混入类。"""
 
@@ -140,18 +158,31 @@ class LlmMixin:
 
             content = msg_dict.get("content")
             if isinstance(content, list):
-                # AstrBot 多媒体消息结构（只保留文本）
+                # AstrBot 多媒体消息结构：只汇总文本分段。
                 text_content = ""
                 for segment in content:
                     if isinstance(segment, dict):
-                        if segment.get("type") == "text":
-                            text_content += segment.get("text", "")
+                        # 分段字典的文本键在不同版本/场景下可能不同，逐个回退可避免丢掉实际文本。
+                        for key in ("text", "content", "message", "value"):
+                            value = segment.get(key)
+                            if isinstance(value, str) and value:
+                                text_content += value
+                                break
                     elif hasattr(segment, "text"):
                         text_content += getattr(segment, "text", "")
                     elif hasattr(segment, "get_text"):
                         text_content += segment.get_text()
                     elif isinstance(segment, str):
                         text_content += segment
+                msg_dict["content"] = text_content
+            elif isinstance(content, dict):
+                # 少数版本会把单条内容存成 dict，同样归约为纯文本。
+                text_content = ""
+                for key in ("text", "content", "message", "value"):
+                    value = content.get(key)
+                    if isinstance(value, str) and value:
+                        text_content = value
+                        break
                 msg_dict["content"] = text_content
             elif not isinstance(content, str):
                 # 非字符串内容强制转字符串
@@ -818,26 +849,47 @@ class LlmMixin:
     # 提示词与动态内容块
     # ------------------------------------------------------------------
     def _build_dynamic_context_text(
-        self, unanswered_count: int, session_config: dict | None = None
+        self,
+        unanswered_count: int,
+        session_config: dict | None = None,
+        *,
+        include_time: bool = True,
+        include_unanswered: bool = True,
     ) -> str:
         """构建每轮都会变化的运行时上下文块。
 
-        仅当主动消息提示词模板未引用相应占位符时才会被追加，
-        避免与模板中的内容重复。
+        各字段由调用方独立决定是否注入，避免“模板只写了其中一个占位符，
+        另一个动态信息被整块省略”。尤其是当前时间：AstrBot 官方的
+        datetime_system_prompt 配置默认不一定开启，因此这里必须保证
+        模板未提供时间时仍能注入，否则会出现星期/日期判断错误。
+
+        Args:
+            unanswered_count: 当前未回复次数。
+            session_config: 会话配置，用于补充会话场景标签。
+            include_time: 是否包含当前时间。
+            include_unanswered: 是否包含未回复累计次数。
+
+        Returns:
+            动态上下文文本；所有动态字段均被模板覆盖时返回空字符串。
         """
-        now_str = format_current_time(self.timezone)
+        lines: list[str] = []
+
+        if include_time:
+            lines.append(f"- 当前时间：{format_current_time(self.timezone)}")
+        if include_unanswered:
+            lines.append(f"- 本次主动消息的未回复累计次数：{unanswered_count}")
+
         session_type = ""
         if isinstance(session_config, dict):
             session_type = str(session_config.get("_session_type") or "")
         type_label = {"friend": "私聊", "group": "群聊"}.get(session_type, "")
-        type_line = f"- 会话场景：{type_label}\n" if type_label else ""
-        return (
-            "<dynamic_context>\n"
-            f"- 当前时间：{now_str}\n"
-            f"- 本次主动消息的未回复累计次数：{unanswered_count}\n"
-            f"{type_line}"
-            "</dynamic_context>"
-        )
+        if type_label:
+            lines.append(f"- 会话场景：{type_label}")
+
+        if not lines:
+            return ""
+
+        return "<dynamic_context>\n" + "\n".join(lines) + "\n</dynamic_context>"
 
     def _build_extra_content_parts(
         self,
@@ -857,15 +909,16 @@ class LlmMixin:
             if part is not None:
                 parts.append(part)
 
-        # 模板已包含占位符时不再重复注入，避免浪费上下文预算。
-        template_has_dynamic = (
-            "{{current_time}}" in prompt_template
-            or "{{unanswered_count}}" in prompt_template
+        # 两个占位符彼此独立：只跳过模板已经提供的字段，缺失的字段仍然注入，
+        # 避免“模板只含 {{unanswered_count}} 时连当前时间一起丢失”。
+        dynamic_text = self._build_dynamic_context_text(
+            unanswered_count,
+            session_config,
+            include_time="{{current_time}}" not in prompt_template,
+            include_unanswered="{{unanswered_count}}" not in prompt_template,
         )
-        if not template_has_dynamic:
-            dynamic_part = self._make_temp_text_part(
-                self._build_dynamic_context_text(unanswered_count, session_config)
-            )
+        if dynamic_text:
+            dynamic_part = self._make_temp_text_part(dynamic_text)
             if dynamic_part is not None:
                 parts.append(dynamic_part)
 
@@ -892,11 +945,15 @@ class LlmMixin:
 
         return await dispatch_event_hook(event, EventType.OnLLMRequestEvent, req)
 
-    async def _dispatch_llm_response_hooks(self, event: Any, resp: Any) -> None:
-        """派发 LLM 响应后置钩子，允许其他插件清理/改写生成结果。"""
+    async def _dispatch_llm_response_hooks(self, event: Any, resp: Any) -> bool:
+        """派发 LLM 响应后置钩子，允许其他插件清理/改写生成结果。
+
+        Returns:
+            True 表示事件已被终止，调用方应放弃本次生成结果。
+        """
         if event is None or EventType is None or resp is None:
-            return
-        await dispatch_event_hook(event, EventType.OnLLMResponseEvent, resp)
+            return False
+        return await dispatch_event_hook(event, EventType.OnLLMResponseEvent, resp)
 
     async def _resolve_chat_provider(self, session_id: str) -> Any:
         """解析用于本轮请求的 Provider 实例。"""
@@ -1018,17 +1075,27 @@ class LlmMixin:
             return None, final_user_simulation_prompt
 
         # 后置钩子：其他插件可在此清理标记、改写文本、追加图片等。
+        response_stopped = False
         try:
-            await self._dispatch_llm_response_hooks(event, llm_response_obj)
+            response_stopped = await self._dispatch_llm_response_hooks(
+                event, llm_response_obj
+            )
         except Exception as e:
             logger.error(f"[主动消息] 派发 LLM 后置钩子失败喵: {e}")
+
+        if response_stopped:
+            # 与官方一致：事件被终止即视为本次结果不应投递（如内容审核拦截）。
+            logger.info("[主动消息] LLM 后置钩子终止了事件传播，放弃本次生成结果喵。")
+            return None, final_user_simulation_prompt
 
         response_text = self._extract_response_text(llm_response_obj)
         if not response_text:
             # 允许“只发图片”的装饰结果：文本为空但消息链存在时仍继续。
             if getattr(llm_response_obj, "result_chain", None):
                 logger.info("[主动消息] 生成结果无文本但有消息链，继续后续流程喵。")
-                return llm_response_obj, final_user_simulation_prompt
+                return llm_response_obj, self._resolve_final_user_prompt(
+                    req, final_user_simulation_prompt
+                )
             logger.warning("[主动消息] LLM 调用失败或返回空内容，重新调度喵。")
             if self.telemetry and self.telemetry.enabled:
                 self._track_task(
@@ -1069,7 +1136,21 @@ class LlmMixin:
                     )
                 )
             )
-        return llm_response_obj, final_user_simulation_prompt
+        return llm_response_obj, self._resolve_final_user_prompt(
+            req, final_user_simulation_prompt
+        )
+
+    @staticmethod
+    def _resolve_final_user_prompt(req: Any, fallback: str) -> str:
+        """取钩子处理后的最终用户提示词。
+
+        扩展插件可能在 on_llm_request 中改写 req.prompt，
+        存档必须使用模型实际收到的内容，否则后续上下文会读到过期版本。
+        """
+        prompt = getattr(req, "prompt", None)
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt
+        return fallback
 
     def _build_provider_request(
         self,
@@ -1093,14 +1174,24 @@ class LlmMixin:
             "extra_user_content_parts": list(extra_parts or []),
             "conversation": conversation,
         }
+        fields = _provider_request_fields()
+        if fields is not None:
+            # 按 dataclass 实际字段独立过滤：某个字段不被支持时不会牵连其他字段。
+            kwargs = {key: value for key, value in kwargs.items() if key in fields}
+            return ProviderRequest(**kwargs)
+
+        # 无法探测字段定义时的兜底：逐个剔除不支持的字段后重试。
         try:
             return ProviderRequest(**kwargs)
         except TypeError:
-            # 旧版本缺少部分字段：逐个剔除不支持的字段后重试。
-            for field_name in ("extra_user_content_parts", "conversation"):
-                kwargs.pop(field_name, None)
+            for field_name in ("conversation", "extra_user_content_parts"):
+                if field_name not in kwargs:
+                    continue
+                candidate = {
+                    key: value for key, value in kwargs.items() if key != field_name
+                }
                 try:
-                    return ProviderRequest(**kwargs)
+                    return ProviderRequest(**candidate)
                 except TypeError:
                     continue
             return ProviderRequest(

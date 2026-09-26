@@ -58,6 +58,37 @@ class ProactiveCoreMixin:
 
         return True, "allowed"
 
+    @staticmethod
+    def _extract_record_text(content: Any) -> str:
+        """从对话历史记录的 content 字段中提取纯文本。
+
+        content 既可能是字符串，这类内容分段列表。
+        这里统一先归约为纯文本再比较。
+        """
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    chunks.append(item)
+                elif isinstance(item, dict):
+                    for key in ("text", "content", "message", "value"):
+                        value = item.get(key)
+                        if isinstance(value, str) and value:
+                            chunks.append(value)
+                            break
+            return "".join(chunks)
+
+        if isinstance(content, dict):
+            for key in ("text", "content", "message", "value"):
+                value = content.get(key)
+                if isinstance(value, str):
+                    return value
+
+        return ""
+
     async def _verify_message_persisted(
         self, session_id: str, conv_id: str, assistant_response: str
     ) -> bool:
@@ -81,17 +112,19 @@ class ProactiveCoreMixin:
                 history = json.loads(history)
             if not isinstance(history, list):
                 return False
-            # 仅比对末尾若干条，兼顾性能与写入位置漂移
-            for record in reversed(history[-6:]):
+            # 只校验“最后一条有内容的 assistant 记录”。
+            for record in reversed(history):
                 if not isinstance(record, dict) or record.get("role") != "assistant":
                     continue
-                serialized = json.dumps(record.get("content", ""), ensure_ascii=False)
-                if target in serialized:
-                    return True
+                extracted = self._extract_record_text(record.get("content", ""))
+                if not extracted.strip():
+                    # 跳过空内容记录，避免历史中的空占位让校验提前失败。
+                    continue
+                return target in extracted
+            return False
         except Exception as e:
             logger.debug(f"[主动消息] 回读校验对话历史失败喵: {e}")
             return False
-        return False
 
     async def _finalize_and_reschedule(
         self,
@@ -346,16 +379,31 @@ class ProactiveCoreMixin:
                 return
 
             # 发送消息与收尾。
-            # 传入原始消息链：当文本为空但 Provider 直接返回了组件（如纯图片）时，
-            # 这些组件即为本次主动消息的全部内容，不能丢弃。
-            await self._send_proactive_message(
-                session_id,
-                response_text,
-                event=proactive_event,
-                initial_chain=result_chain,
+            # 传入原始消息链：它同时承载文本与非文本组件（如纯图片、
+            # 或“文本 + 图片”的混合结果），只传文本会丢弃其中的媒体组件。
+            sent_ok = (
+                await self._send_proactive_message(
+                    session_id,
+                    response_text,
+                    event=proactive_event,
+                    initial_chain=result_chain,
+                )
+                is True
             )
 
-            # 存档使用装饰前的原始文本，其语义不适用于对话历史，避免污染后续上下文。
+            if not sent_ok:
+                # 未送达（平台/核心 API 均失败，或被装饰钩子如内容审核拦截）：
+                # 不写对话历史、不计入“已发送”次数，避免未送达内容污染后续上下文；
+                # 但仍重新调度，防止会话因单次失败而永久静默。
+                logger.warning(
+                    f"[主动消息] {self._get_session_log_str(session_id)} 的本次主动消息未能送达，已跳过存档与计数并重新调度喵。"
+                )
+                await self._schedule_next_chat_and_save(session_id)
+                return
+
+            # 存档使用装饰前的原始文本：
+            # 官方 pipeline 中对话历史永远记录模型原始输出，装饰仅作用于展示层
+            # 若此处改存装饰后文本，会与普通聊天行为不一致并污染后续上下文。
             await self._finalize_and_reschedule(
                 session_id,
                 conv_id,
@@ -364,10 +412,13 @@ class ProactiveCoreMixin:
                 unanswered_count,
             )
 
-            # 群聊由沉默倒计时驱动，不依赖持久化调度字段，故在此清理残留状态
+            # 群聊由沉默倒计时驱动，不依赖持久化调度字段，故在此清理残留状态。
+            # 注意：这里刻意不用 is_group_session 命名，避免与同名工具函数混淆。
             parsed = self._parse_session_id(session_id)
-            is_group_session = parsed and ("Group" in parsed[1] or "Guild" in parsed[1])
-            if is_group_session:
+            session_is_group = bool(parsed) and (
+                "Group" in parsed[1] or "Guild" in parsed[1]
+            )
+            if session_is_group:
                 async with self.data_lock:
                     if self._clear_session_schedule_state(session_id):
                         await self._save_data_internal()

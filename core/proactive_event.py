@@ -65,16 +65,48 @@ PROACTIVE_MESSAGE_ID_PREFIX = "proactive"
 # ----------------------------------------------------------------------
 # 通用工具
 # ----------------------------------------------------------------------
+# 标准消息类型段：用于精确判定会话类型，避免平台 ID / 目标 ID 干扰判定结果。
+_GROUP_MESSAGE_TYPE_TOKENS = frozenset(
+    {"groupmessage", "guildmessage", "group", "guild"}
+)
+_PRIVATE_MESSAGE_TYPE_TOKENS = frozenset(
+    {"friendmessage", "privatemessage", "friend", "private"}
+)
+
+
 def is_group_session(umo: str) -> bool:
-    """判断 UMO 是否指向群聊会话。"""
-    lowered = (umo or "").lower()
+    """判断 UMO 是否指向群聊会话。
+
+    判定优先取 UMO 的“消息类型段”（如 GroupMessage），
+    仅在缺少类型段的非标准 UMO 上才退化为整串匹配。
+
+    这样可以避免平台 ID（如 qq_group_bot）或目标 ID 中含 group / guild
+    字样时把私聊误判成群聊——那会导致 Active Message 被按群会话投递，
+    轻则投递失败、重则内容被送往错误目标。
+    """
+    text = (umo or "").strip()
+    if not text:
+        return False
+
+    # segments[0] 是平台标识段，跳过后只看后续的类型段，避免平台名干扰。
+    for segment in text.split(":")[1:]:
+        lowered = segment.lower()
+        if lowered in _GROUP_MESSAGE_TYPE_TOKENS:
+            return True
+        if lowered in _PRIVATE_MESSAGE_TYPE_TOKENS:
+            return False
+
+    # 缺少类型段的非标准 UMO：退化为整串匹配以保持向后兼容。
+    lowered = text.lower()
     return "group" in lowered or "guild" in lowered
 
 
 def resolve_message_type(umo: str) -> MessageType:
     """根据 UMO 推断标准 MessageType。"""
     return (
-        MessageType.GROUP_MESSAGE if is_group_session(umo) else MessageType.FRIEND_MESSAGE
+        MessageType.GROUP_MESSAGE
+        if is_group_session(umo)
+        else MessageType.FRIEND_MESSAGE
     )
 
 
@@ -236,9 +268,7 @@ async def dispatch_event_hook(
 
         try:
             if event.is_stopped():
-                logger.info(
-                    f"[主动消息] 钩子 {handler_name} 终止了事件传播喵。"
-                )
+                logger.info(f"[主动消息] 钩子 {handler_name} 终止了事件传播喵。")
                 return True
         except Exception:
             continue
@@ -270,6 +300,7 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
         sender_id: str = "",
         sender_name: str = "",
         is_group: bool = False,
+        persist_history: Any = None,
     ) -> None:
         # 注意：基类 __init__ 内部会读取 self.unified_msg_origin（用于 TraceSpan），
         # 因此这些被重写属性依赖的字段必须在 super().__init__() 之前完成赋值。
@@ -277,7 +308,13 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
         self._proactive_target_id = target_id
         self._proactive_umo = session_id
         self._proactive_is_group = is_group
+        # 平台流水补写回调：形如 `async def (umo: str, chain: MessageChain) -> None`。
+        # 统一在事件层触发，使装饰期与发送后钩子补发的消息也能进入后续上下文。
+        self._proactive_persist_history = persist_history
         self.proactive_sent_chains: list[MessageChain] = []
+        # 发送失败标记：调用方可据此跳过流水补写、历史存档与成功计数，
+        # 避免“未送达的消息”出现在后续上下文中。
+        self.proactive_send_failed = False
 
         message_obj = AstrBotMessage()
         message_obj.type = message_type
@@ -325,52 +362,90 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
     # ------------------------------------------------------------------
     # 发送能力
     # ------------------------------------------------------------------
-    async def send(self, message: MessageChain) -> None:  # type: ignore[override]
+    async def send(self, message: MessageChain) -> bool:  # type: ignore[override]
         """发送消息到目标平台。
 
         显式委托给平台实例，并在平台不可用时回退到核心发送 API。
+        发送成功后同步补写平台消息流水，保证钩子在装饰/发送后阶段
+        用 event.send(...) 补发的内容同样可被后续上下文读取。
+
+        Returns:
+            True 表示消息已成功送达；False 表示平台与核心 API 均未能送达。
         """
         if message is None:
-            return
-
-        self.proactive_sent_chains.append(message)
-        self._has_send_oper = True
+            return False
 
         plugin = self._proactive_plugin
         if plugin is None:
-            return
+            return False
 
+        self.proactive_sent_chains.append(message)
+
+        sent = False
         platform = self._resolve_platform()
         if platform is not None and platform.status == PlatformStatus.RUNNING:
             if MessageSession is None:  # pragma: no cover - 极旧版本
-                await self._send_via_core_api(message)
-                return
-            try:
-                session_obj = MessageSession(
-                    platform_name=platform.meta().id,
-                    message_type=(
-                        MessageType.GROUP_MESSAGE
-                        if self._proactive_is_group
-                        else MessageType.FRIEND_MESSAGE
-                    ),
-                    session_id=self._proactive_target_id,
-                )
-                await platform.send_by_session(session_obj, message)
-                return
-            except Exception as e:
-                logger.error(f"[主动消息] 平台发送失败喵，尝试核心 API 兜底: {e}")
+                sent = await self._send_via_core_api(message)
+            else:
+                try:
+                    session_obj = MessageSession(
+                        platform_name=platform.meta().id,
+                        message_type=(
+                            MessageType.GROUP_MESSAGE
+                            if self._proactive_is_group
+                            else MessageType.FRIEND_MESSAGE
+                        ),
+                        session_id=self._proactive_target_id,
+                    )
+                    await platform.send_by_session(session_obj, message)
+                    sent = True
+                except Exception as e:
+                    logger.error(f"[主动消息] 平台发送失败喵，尝试核心 API 兜底: {e}")
 
-        await self._send_via_core_api(message)
+        if not sent:
+            sent = await self._send_via_core_api(message)
 
-    async def _send_via_core_api(self, message: MessageChain) -> None:
-        """通过核心发送 API 兜底发送。"""
+        if not sent:
+            # 标记失败，调用方据此跳过流水、存档与成功计数。
+            self.proactive_send_failed = True
+            logger.error("[主动消息] 事件发送失败喵：平台与核心 API 均未能送达。")
+            return False
+
+        # 与官方语义对齐：仅在真正送达后才置位，避免依赖该标志的插件误判。
+        self._has_send_oper = True
+        await self._persist_sent_chain(message)
+        return True
+
+    async def _send_via_core_api(self, message: MessageChain) -> bool:
+        """通过核心发送 API 兜底发送。
+
+        Returns:
+            True 表示已成功提交给平台；False 表示未送达。
+        """
         plugin = self._proactive_plugin
         if plugin is None:
-            return
+            return False
         try:
-            await plugin.context.send_message(self._proactive_umo, message)
+            result = await plugin.context.send_message(self._proactive_umo, message)
         except Exception as e:  # pragma: no cover - 取决于运行时
             logger.error(f"[主动消息] 核心 API 发送失败喵: {e}")
+            return False
+        # 官方实现返回 bool：False 表示没有找到匹配平台，消息实际未发出，
+        # 此时必须上报失败，否则未送达的内容会被当作已发送写入流水与历史。
+        if result is False:
+            logger.warning("[主动消息] 核心 API 未找到匹配平台，消息未送达喵。")
+            return False
+        return True
+
+    async def _persist_sent_chain(self, message: MessageChain) -> None:
+        """把已送达的消息补写入平台消息流水。"""
+        callback = self._proactive_persist_history
+        if callback is None:
+            return
+        try:
+            await callback(self._proactive_umo, message)
+        except Exception as e:  # pragma: no cover - 取决于运行时
+            logger.warning(f"[主动消息] 补写平台流水失败喵: {e}")
 
     def _resolve_platform(self) -> Any:
         """解析当前事件所属的平台实例。"""
@@ -386,6 +461,19 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
 # ----------------------------------------------------------------------
 # 工厂
 # ----------------------------------------------------------------------
+def _resolve_persist_history_callback(plugin: Any) -> Any:
+    """解析插件提供的平台流水补写回调。
+
+    采用鸭子类型查找而非硬编码导入，使本模块保持与具体插件解耦：
+    任何命名为 _persist_proactive_message_to_platform_history 的协程方法
+    都会被自动接入事件发送流程。
+    """
+    if plugin is None:
+        return None
+    callback = getattr(plugin, "_persist_proactive_message_to_platform_history", None)
+    return callback if callable(callback) else None
+
+
 def build_proactive_event(
     *,
     plugin: Any,
@@ -396,6 +484,7 @@ def build_proactive_event(
     self_id: str = "",
     sender_id: str = "",
     sender_name: str = "",
+    persist_history: Any = None,
 ) -> ProactiveMessageEvent | None:
     """构建主动消息伪事件。
 
@@ -404,10 +493,11 @@ def build_proactive_event(
         platform_inst: 目标平台实例；为 None 时仍会构造事件，但发送能力降级。
         session_id: 规范化后的完整 UMO。
         target_id: UMO 中的会话目标 ID。
-        msg_type_str: UMO 中的消息类型字符串。
+        msg_type_str: UMO 中的消息类型字符串（如 GroupMessage）。
         self_id: 机器人自身 ID。
         sender_id: 最近活跃的发送者 ID（群聊场景）。
         sender_name: 最近活跃的发送者昵称。
+        persist_history: 平台流水补写回调；省略时自动从插件实例解析。
 
     Returns:
         构造好的伪事件；基类不可用时返回 None。
@@ -427,6 +517,9 @@ def build_proactive_event(
         else _build_fallback_platform_meta(session_id)
     )
 
+    if persist_history is None:
+        persist_history = _resolve_persist_history_callback(plugin)
+
     is_group = is_group_session(msg_type_str)
     try:
         return ProactiveMessageEvent(
@@ -439,6 +532,7 @@ def build_proactive_event(
             sender_id=sender_id,
             sender_name=sender_name,
             is_group=is_group,
+            persist_history=persist_history,
         )
     except Exception as e:  # pragma: no cover - 防御性兜底
         logger.error(f"[主动消息] 构造事件对象失败喵: {e}")
@@ -460,6 +554,7 @@ def build_proactive_event_for_session(
     *,
     plugin: Any,
     session_id: str,
+    persist_history: Any = None,
 ) -> ProactiveMessageEvent | None:
     """按 UMO 自治构建伪事件（自动解析平台、self_id 与发送者）。
 
@@ -487,6 +582,7 @@ def build_proactive_event_for_session(
         self_id=self_id,
         sender_id=sender_id,
         sender_name=sender_name,
+        persist_history=persist_history,
     )
 
 
