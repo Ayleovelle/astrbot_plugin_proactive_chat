@@ -1,4 +1,12 @@
-"""发送与装饰钩子模块。"""
+"""发送与装饰钩子模块。
+
+本模块负责把生成的主动消息按 AstrBot 官方语义投递出去，核心原则：
+
+1. 复用标准钩子。
+2. 先装饰、后分段：官方 pipeline 是先让装饰器处理完整消息链，再执行分段。
+   这里遵循同样顺序，避免装饰器只能看到文本碎片而无法解析跨段标记。
+3. 单一事件贯穿，复用同一个事件实例。
+"""
 
 from __future__ import annotations
 
@@ -12,28 +20,39 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.core.message.components import Plain, Record
-from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
-from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
-from astrbot.core.platform.message_type import MessageType
+from astrbot.core.message.message_event_result import (
+    MessageChain,
+    MessageEventResult,
+    ResultContentType,
+)
 from astrbot.core.platform.platform import PlatformStatus
-from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
-try:
-    from astrbot.api.event import AstrMessageEvent as AstrBotMessageEvent
-except ImportError:
-    AstrBotMessageEvent = None
+from .proactive_event import (
+    build_proactive_event_for_session,
+    dispatch_event_hook,
+    is_group_session,
+    resolve_message_type,
+)
 
-try:
+try:  # pragma: no cover - 取决于 AstrBot 版本
+    from astrbot.core.star.star_handler import EventType
+except ImportError:  # pragma: no cover
+    EventType = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - 取决于 AstrBot 版本
     from astrbot.core.platform.astr_message_event import MessageSession as MS
-except ImportError:
-    from astrbot.core.platform.message_session import MessageSession as MS
+except ImportError:  # pragma: no cover
+    try:
+        from astrbot.core.platform.message_session import MessageSession as MS
+    except ImportError:
+        MS = None  # type: ignore[assignment]
 
-try:
+try:  # pragma: no cover - 取决于 AstrBot 版本
     from astrbot.core.platform.sources.webchat.message_parts_helper import (
         message_chain_to_storage_message_parts,
     )
-except ImportError:
-    message_chain_to_storage_message_parts = None
+except ImportError:  # pragma: no cover
+    message_chain_to_storage_message_parts = None  # type: ignore[assignment]
 
 
 class SenderMixin:
@@ -44,6 +63,9 @@ class SenderMixin:
     telemetry: Any
     data_dir: Any
 
+    # ------------------------------------------------------------------
+    # 文本分段
+    # ------------------------------------------------------------------
     def _split_text(self, text: str, settings: dict) -> list[str]:
         """根据配置对文本进行分段。"""
         split_mode = settings.get("split_mode", "regex")
@@ -94,7 +116,6 @@ class SenderMixin:
                     if content_cleanup_pattern:
                         # 这里的 sub 属于“分段后清理”：
                         # content 已经是单个分段，不会再影响其他分段边界。
-                        # 这样可避免把正则切分职责与内容删除职责耦合在一起。
                         content = content_cleanup_pattern.sub("", content)
                     if content.strip():
                         # 清理后若只剩空白，则直接丢弃，避免发送空消息段。
@@ -102,8 +123,6 @@ class SenderMixin:
                 elif seg:
                     cleaned_seg = seg
                     if content_cleanup_pattern:
-                        # 极少数情况下 findall 可能返回非 tuple 的字符串分段；
-                        # 这里保持同样的清理策略，确保两类返回值行为一致。
                         cleaned_seg = content_cleanup_pattern.sub("", cleaned_seg)
                     if cleaned_seg.strip():
                         result.append(cleaned_seg)
@@ -128,7 +147,6 @@ class SenderMixin:
             cleaned_seg = seg
             if content_cleanup_pattern:
                 # 与 words 模式保持一致：先完成切分，再对每段内容做独立清理。
-                # 这样当默认规则为 [\n] 时，可稳定去除分段回复中残留的空行字符。
                 cleaned_seg = content_cleanup_pattern.sub("", cleaned_seg)
             if cleaned_seg.strip():
                 # 过滤掉清理后为空的分段，避免平台收到空 Plain 消息。
@@ -159,109 +177,157 @@ class SenderMixin:
 
         return random.uniform(interval[0], interval[1])
 
-    async def _trigger_decorating_hooks(self, session_id: str, chain: list) -> list:
-        """触发 OnDecoratingResultEvent 钩子。"""
-        parsed = self._parse_session_id(session_id)
-        if not parsed:
-            return chain
+    def _segment_decorated_chain(self, chain: list, seg_conf: dict) -> list:
+        """对装饰后的完整消息链执行分段。
 
-        # 解析出平台、消息类型、目标 ID，用于构造事件上下文
-        platform_name, msg_type_str, target_id = parsed
-        platform_inst = None
-        for p in self.context.platform_manager.platform_insts:
-            if p.meta().id == platform_name:
-                platform_inst = p
-                break
+        只有 Plain 组件参与切分，非文本组件（图片、语音等）原样保留并保持相对顺序。
 
-        # 兼容按平台显示名匹配（部分平台可能用 name 进行标识）
-        if not platform_inst:
-            for p in self.context.platform_manager.platform_insts:
-                if p.meta().name == platform_name:
-                    platform_inst = p
-                    break
+        Args:
+            chain: 已完成装饰的消息链组件列表。
+            seg_conf: 分段回复配置。
 
-        if not platform_inst:
-            return chain
+        Returns:
+            切分后的组件列表；若无需切分则返回原列表。
+        """
+        threshold = seg_conf.get("words_count_threshold", 150)
 
-        # 构造伪造的消息对象以触发装饰链
-        message_obj = AstrBotMessage()
-        if "Friend" in msg_type_str:
-            message_obj.type = MessageType.FRIEND_MESSAGE
-        elif "Group" in msg_type_str:
-            message_obj.type = MessageType.GROUP_MESSAGE
-            message_obj.group = Group(group_id=target_id)
-        else:
-            message_obj.type = MessageType.FRIEND_MESSAGE
+        # 注意：threshold 的语义是“**不分段字数阈值**”，与字段历史含义保持一致。
+        # 文本较长（> threshold）时整段发送，避免长文被切碎影响阅读体验。
+        new_chain: list = []
+        for comp in chain:
+            if not isinstance(comp, Plain):
+                new_chain.append(comp)
+                continue
 
-        # 构造最小可用消息对象，让装饰器可在统一事件结构上改写链
-        message_obj.session_id = target_id
-        message_obj.message = chain
-        message_obj.self_id = self.session_data.get(session_id, {}).get(
-            "self_id", "bot"
-        )
-        message_obj.sender = MessageMember(user_id=target_id)
-        message_obj.message_str = ""
-        message_obj.raw_message = None
-        message_obj.message_id = ""
+            text = comp.text or ""
+            if not text.strip():
+                continue
 
-        # 旧版本若无事件类则跳过装饰阶段，直接返回原链
-        if not AstrBotMessageEvent:
-            return chain
+            if len(text) > threshold:
+                new_chain.append(comp)
+                continue
 
-        event = AstrBotMessageEvent(
-            message_str="",
-            message_obj=message_obj,
-            platform_meta=platform_inst.meta(),
-            session_id=target_id,
-        )
+            segments = self._split_text(text, seg_conf)
+            if not segments:
+                new_chain.append(comp)
+                continue
 
-        # 注入结果链以便装饰器修改
-        res = MessageEventResult()
-        res.chain = chain
-        event.set_result(res)
+            for seg in segments:
+                new_chain.append(Plain(text=seg))
 
-        # 顺序执行所有 OnDecoratingResultEvent 处理器
-        handlers = star_handlers_registry.get_handlers_by_event_type(
-            EventType.OnDecoratingResultEvent
-        )
-        for handler in handlers:
-            try:
-                logger.debug(
-                    f"[主动消息] 正在执行装饰钩子: {handler.handler_full_name} ({handler.handler_module_path}) 喵"
-                )
-                await handler.handler(event)
-            except Exception as e:
-                error_type = type(e).__name__
-                logger.error(
-                    f"[主动消息] 执行装饰钩子失败喵！来源: {handler.handler_full_name}, "
-                    f"错误类型: {error_type}, 错误详情: {e}"
-                )
-                if self.telemetry and self.telemetry.enabled:
-                    # 装饰钩子属于外围扩展链路，单独上报便于定位是否为第三方装饰器导致的问题。
-                    self._track_task(
-                        asyncio.create_task(
-                            self.telemetry.track_error(
-                                e,
-                                module="core.message_sender._trigger_decorating_hooks",
-                            )
-                        )
-                    )
-                if "Available" in error_type:
-                    logger.error(
-                        f"[主动消息] 抓到可能导致 ApiNotAvailable 的嫌疑人喵！模块: {handler.handler_module_path}"
-                    )
+        return new_chain or chain
 
-        res = event.get_result()
-        if res is not None:
-            return res.chain if res.chain is not None else []
-        return chain
+    # ------------------------------------------------------------------
+    # 事件构造
+    # ------------------------------------------------------------------
+    def _build_proactive_event(self, session_id: str) -> Any:
+        """为指定会话构建贯穿全流程的伪事件。"""
+        return build_proactive_event_for_session(plugin=self, session_id=session_id)
 
+    @staticmethod
+    def _mark_event_send_failed(event: Any) -> None:
+        """在事件支持时同步发送失败标记，保证标记与实际结果一致。"""
+        if event is None:
+            return
+        try:
+            if hasattr(event, "proactive_send_failed"):
+                event.proactive_send_failed = True
+        except Exception:  # pragma: no cover - 未知事件实现
+            pass
+
+    @staticmethod
+    def _mark_event_sent(event: Any) -> None:
+        """在事件支持时同步“已有发送操作”标记，供依赖该标志的插件使用。"""
+        if event is None:
+            return
+        try:
+            event._has_send_oper = True  # noqa: SLF001 - 与官方事件语义对齐
+        except Exception:  # pragma: no cover - 未知事件实现
+            pass
+
+    @staticmethod
+    def _safe_is_stopped(event: Any) -> bool:
+        """安全读取事件终止标志，兼容缺少该方法的旧实现。"""
+        try:
+            return bool(event.is_stopped())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _clear_event_result(event: Any) -> None:
+        """清理事件结果残留，与官方 respond 阶段收尾语义保持一致。"""
+        if event is None:
+            return
+        try:
+            event.clear_result()
+        except Exception:
+            pass
+
+    async def _run_decorating_hooks(
+        self, event: Any, components: list
+    ) -> tuple[list, bool]:
+        """对完整消息链派发 on_decorating_result 钩子。
+
+        先注入初始链，再在钩子执行后回读，允许装饰器整体替换消息链。
+
+        与官方 result_decorate 阶段保持一致：任一钩子调用 stop_event() 后，
+        官方会立即 return、不再投递消息。这里必须同样放弃发送，
+        否则内容审核/风控类插件在主动消息链路上的拦截会静默失效。
+
+        Args:
+            event: 贯穿链路的事件对象。
+            components: 初始组件列表。
+
+        Returns:
+            (装饰后的组件列表, 是否应继续发送)。
+            第二项为 False 表示事件被扩展插件终止，调用方应放弃发送与记账。
+        """
+        if event is None or EventType is None:
+            return components, True
+
+        result = MessageEventResult()
+        # 关键：标记为 LLM 结果，使依赖 `is_llm_result()` 的装饰器正常工作。
+        result.set_result_content_type(ResultContentType.LLM_RESULT)
+        result.chain = list(components)
+        event.set_result(result)
+
+        stopped = False
+        try:
+            stopped = await dispatch_event_hook(
+                event, EventType.OnDecoratingResultEvent
+            )
+        except Exception as e:
+            logger.error(f"[主动消息] 派发装饰钩子失败喵: {e}")
+
+        if stopped or self._safe_is_stopped(event):
+            logger.info(
+                "[主动消息] 装饰钩子终止了事件传播，已放弃本次主动消息的发送喵。"
+            )
+            return [], False
+
+        decorated = event.get_result()
+        if decorated is None:
+            logger.debug("[主动消息] 装饰钩子清空了消息结果喵。")
+            return [], True
+        chain = getattr(decorated, "chain", None)
+        if chain is None:
+            return [], True
+
+        # 回读结果链：装饰器可能整体替换了 chain（含图片等非文本组件）。
+        return list(chain), True
+
+    # ------------------------------------------------------------------
+    # 平台流水补写
+    # ------------------------------------------------------------------
     async def _persist_proactive_message_to_platform_history(
         self,
         session_id: str,
         chain: MessageChain,
     ) -> None:
-        """将主动消息补写入平台消息流水，弥补部分适配器不会自动持久化的问题。"""
+        """将主动消息补写入平台消息流水，弥补部分适配器不会自动持久化的问题。
+
+        webchat 自身会持久化消息，统一在此跳过，避免不同调用点规则不一致。
+        """
         try:
             parsed = self._parse_session_id(session_id)
         except Exception as e:
@@ -275,6 +341,9 @@ class SenderMixin:
             return
 
         platform_id, _message_type, target_id = parsed
+        if platform_id == "webchat":
+            # webchat 适配器自身负责持久化，重复写入会产生重复记录。
+            return
         history_mgr = getattr(self.context, "message_history_manager", None)
         if not history_mgr or message_chain_to_storage_message_parts is None:
             return
@@ -308,29 +377,33 @@ class SenderMixin:
         except Exception as e:
             logger.warning(f"[主动消息] 补写平台流水失败喵: {e}", exc_info=True)
 
-    async def _send_chain_with_hooks(self, session_id: str, components: list) -> None:
-        """发送消息链（含装饰钩子）。"""
-        processed_chain_list = await self._trigger_decorating_hooks(
-            session_id, components
-        )
-        if not processed_chain_list:
-            return
+    # ------------------------------------------------------------------
+    # 发送
+    # ------------------------------------------------------------------
+    async def _send_chain_direct(self, session_id: str, components: list) -> bool:
+        """直接通过平台实例发送消息链（不经过事件）。
 
-        # 将处理后的组件列表封装为统一消息链对象
-        chain = MessageChain(processed_chain_list)
+        仅作为事件不可用时的回退路径，正常流程请使用事件发送，
+        以确保第三方插件在装饰/发送后阶段拿到一致的上下文。
+
+        Returns:
+            True 表示已成功送达；False 表示未送达。
+        """
+        if not components:
+            return False
+
+        chain = MessageChain(list(components))
         parsed = self._parse_session_id(session_id)
         if not parsed:
             # 无法解析则使用核心 API 兜底
-            await self.context.send_message(session_id, chain)
-            await self._persist_proactive_message_to_platform_history(session_id, chain)
-            return
+            return await self._send_chain_via_core_api(session_id, chain)
 
         p_id, m_type_str, t_id = parsed
-        m_type = (
-            MessageType.GROUP_MESSAGE
-            if "Group" in m_type_str
-            else MessageType.FRIEND_MESSAGE
-        )
+        if MS is None:  # pragma: no cover - 极旧版本
+            return await self._send_chain_via_core_api(session_id, chain)
+
+        # 依据 UMO 的“消息类型段”精确判定会话类型。
+        m_type = resolve_message_type(m_type_str)
 
         # 精确匹配平台实例：避免将消息发往错误平台
         platforms = self.context.platform_manager.get_insts()
@@ -340,22 +413,18 @@ class SenderMixin:
             logger.warning(
                 f"[主动消息] 找不到指定的平台 {p_id} 喵，尝试使用核心 API 兜底喵。"
             )
-            await self.context.send_message(session_id, chain)
-            await self._persist_proactive_message_to_platform_history(session_id, chain)
-            return
+            return await self._send_chain_via_core_api(session_id, chain)
 
         if target_platform.status != PlatformStatus.RUNNING:
             logger.warning(f"[主动消息] 平台 {p_id} 未运行喵，跳过主动消息喵。")
-            return
+            return False
 
         try:
             session_obj = MS(platform_name=p_id, message_type=m_type, session_id=t_id)
             await target_platform.send_by_session(session_obj, chain)
             logger.debug(f"[主动消息] 消息将通过平台 {p_id} 送达喵")
-            if p_id != "webchat":
-                await self._persist_proactive_message_to_platform_history(
-                    session_id, chain
-                )
+            await self._persist_proactive_message_to_platform_history(session_id, chain)
+            return True
         except Exception as e:
             logger.error(f"[主动消息] 通过平台 {p_id} 发送失败喵: {e}")
             logger.debug(traceback.format_exc())
@@ -365,19 +434,121 @@ class SenderMixin:
                     asyncio.create_task(
                         self.telemetry.track_error(
                             e,
-                            module="core.message_sender._send_chain_with_hooks",
+                            module="core.message_sender._send_chain_direct",
                         )
                     )
                 )
+            return await self._send_chain_via_core_api(session_id, chain)
 
-    async def _send_proactive_message(self, session_id: str, text: str) -> None:
-        """发送主动消息（支持TTS与分段）。"""
+    async def _send_chain_via_core_api(
+        self, session_id: str, chain: MessageChain
+    ) -> bool:
+        """通过核心发送 API 兜底发送，并保证“失败”是可感知的。
+
+        这里显式检查返回值，并把结果上抛给调用方。
+
+        Returns:
+            True 表示已成功送达；False 表示未送达。
+        """
+        try:
+            result = await self.context.send_message(session_id, chain)
+        except Exception as e:
+            logger.error(f"[主动消息] 核心 API 发送失败喵: {e}")
+            return False
+
+        if result is False:
+            logger.error(
+                f"[主动消息] 核心 API 未能找到匹配平台，消息未送达喵: {session_id}"
+            )
+            return False
+
+        await self._persist_proactive_message_to_platform_history(session_id, chain)
+        return True
+
+    async def _send_chain(
+        self,
+        session_id: str,
+        event: Any,
+        components: list,
+    ) -> bool:
+        """发送一条消息链（优先走事件，事件不可用时回退平台直发）。
+
+        Returns:
+            True 表示已成功送达；False 表示所有发送路径均未送达。
+        """
+        if not components:
+            return False
+
+        chain = MessageChain(list(components))
+
+        if event is not None:
+            try:
+                # 事件发送内部已在成功送达后补写平台流水，
+                # 因此这里不再重复补写，避免同一条消息被写入两次。
+                sent = await event.send(chain)
+            except Exception as e:
+                # 仅“抛出异常”才回退直发：此时送达状态未知
+                # （可能已投递但响应超时），值得再用直发路径尝试一次。
+                logger.error(f"[主动消息] 事件发送异常喵，回退平台直发: {e}")
+                sent_direct = await self._send_chain_direct(session_id, components)
+                if sent_direct:
+                    self._mark_event_sent(event)
+                else:
+                    self._mark_event_send_failed(event)
+                return sent_direct
+
+            if sent is True:
+                return True
+            if sent is None:
+                # 未知事件实现不返回结果（基类 send 即为此形态）：
+                # 无法判定送达状态，按官方语义视为已投递并自行补写流水。
+                await self._persist_proactive_message_to_platform_history(
+                    session_id, chain
+                )
+                return True
+
+            # sent is False：事件实现内部已依次尝试平台直发与核心 API 兜底，
+            # 两者均未成功。此处不能再调用 _send_chain_direct，否则会对同一平台
+            # 重放 send_by_session 与核心 API 请求。
+            self._mark_event_send_failed(event)
+            logger.error("[主动消息] 事件发送与核心 API 兜底均未送达，不再重复尝试喵。")
+            return False
+
+        return await self._send_chain_direct(session_id, components)
+
+    async def _send_proactive_message(
+        self,
+        session_id: str,
+        text: str,
+        event: Any = None,
+        initial_chain: list | None = None,
+    ) -> bool:
+        """发送主动消息（支持 TTS 与分段）。
+
+        流程严格对齐官方语义：
+
+        1. TTS（可选）：语音作为独立形态直接投递；
+        2. 文本：先对完整消息链派发装饰钩子，再按配置分段；
+        3. 全部发送完成后派发 after_message_sent，供装饰器补发后续内容。
+
+        Args:
+            session_id: 会话 UMO。
+            text: 生成的主动消息文本。
+            event: 贯穿本轮的伪事件；为 None 时会尝试内部构建。
+            initial_chain: Provider 直接返回的消息链组件（文本 + 媒体的完整载体）。
+
+        Returns:
+            True 表示至少有一条消息成功送达；False 表示未送达或被装饰钩子拦截。
+        """
         session_config = self._get_session_config(session_id)
         if not session_config:
             logger.info(
                 f"[主动消息] 无法获取会话配置，跳过 {self._get_session_log_str(session_id)} 的消息发送喵。"
             )
-            return
+            return False
+
+        if event is None:
+            event = self._build_proactive_event(session_id)
 
         logger.info(
             f"[主动消息] 开始发送 {self._get_session_log_str(session_id, session_config)} 的主动消息喵。"
@@ -385,21 +556,28 @@ class SenderMixin:
 
         tts_conf = session_config.get("tts_settings", {})
         seg_conf = session_config.get("segmented_reply_settings", {})
+        text = text or ""
 
-        # 先尝试 TTS：成功后是否继续发文本由 always_send_text 控制
+        # 先尝试 TTS：成功后是否继续发文本由 always_send_text 控制。
+        # TTS 属于发送形态转换，不参与文本装饰，避免装饰器把语音再转成文本。
         is_tts_sent = False
-        if tts_conf.get("enable_tts", True):
+        if tts_conf.get("enable_tts", True) and text.strip():
             try:
                 logger.info("[主动消息] 尝试进行手动TTS喵。")
                 tts_provider = self.context.get_using_tts_provider(umo=session_id)
                 if tts_provider:
                     audio_path = await tts_provider.get_audio(text)
                     if audio_path:
-                        await self._send_chain_with_hooks(
-                            session_id, [Record(file=audio_path)]
+                        # 只有真正送达才视为已发送 TTS；
+                        # 否则按配置继续尝试发送文本，避免整轮静默丢失。
+                        is_tts_sent = (
+                            await self._send_chain(
+                                session_id, event, [Record(file=audio_path)]
+                            )
+                            is True
                         )
-                        is_tts_sent = True
-                        await asyncio.sleep(0.5)
+                        if is_tts_sent:
+                            await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"[主动消息] 手动TTS流程发生异常喵: {e}")
                 if self.telemetry and self.telemetry.enabled:
@@ -416,26 +594,71 @@ class SenderMixin:
         # 是否继续发送文本：未发出 TTS 或配置要求始终发文本
         should_send_text = not is_tts_sent or tts_conf.get("always_send_text", True)
 
+        # 发送结果汇总：未送达的内容不得计入“已发送”，
+        # 否则会写入对话历史与成功遥测，污染后续上下文。
+        any_sent = is_tts_sent
+
         if should_send_text:
+            # 构造初始消息链。
+            # Provider 的 result_chain 是“文本 + 媒体”的完整载体，必须以其为起点，
+            # 否则“文本 + 图片”这类结果会因文本非空而只发送文本、丢弃媒体。
+            base_components: list = list(initial_chain) if initial_chain else []
+
+            # LLMResponse.completion_text 由链内“全部”Plain 组件
+            # 拼接而成，因此链本身即是文本的权威来源。
+            # - 链中已有 Plain 时直接采用该链，既不做覆盖也不原地改写上游的组件对象；
+            # - 仅当链中完全没有 Plain、但存在独立文本时，才补入一个文本首段，让装饰器能看到完整内容。
+            text_value = text.strip()
+            if text_value and not any(
+                isinstance(comp, Plain) for comp in base_components
+            ):
+                base_components.insert(0, Plain(text=text_value))
+
+            # 步骤一：对完整消息链执行装饰，让装饰器看到完整文本。
+            # 装饰钩子可终止事件（如内容审核拦截），此时必须放弃发送与记账。
+            decorated_chain, should_send = await self._run_decorating_hooks(
+                event, base_components
+            )
+            if not should_send:
+                self._clear_event_result(event)
+                return False
+            if not decorated_chain:
+                logger.debug("[主动消息] 装饰后消息链为空，跳过文本发送喵。")
+
+            # 步骤二：按配置对装饰后的链执行分段。
             enable_seg = seg_conf.get("enable", False)
-            threshold = seg_conf.get("words_count_threshold", 150)
+            send_chain = decorated_chain
+            segmented = False
+            if enable_seg and decorated_chain:
+                send_chain = self._segment_decorated_chain(decorated_chain, seg_conf)
+                # 仅当分段导致组件数量变化时，才认为确实执行了分段。
+                segmented = len(send_chain) != len(decorated_chain)
 
-            # 注意：这里的 threshold 语义是“**不分段字数阈值**”，与字段名历史含义保持一致。
-            # 也就是说：
-            # 1. 文本较短（<= threshold）时，允许按规则切成多段，模拟更自然的连续输出；
-            # 2. 文本较长（> threshold）时，直接整段发送，避免长文被切碎后影响阅读体验。
-            # 该行为与 [`_conf_schema.json`](./_conf_schema.json) 和 [`README.md`](README.md) 的现有说明一致，
-            # 因此这里不是“超过阈值才分段”的常见语义，而是本插件刻意保留的兼容策略。
-            if enable_seg and len(text) <= threshold:
-                segments = self._split_text(text, seg_conf)
-                if not segments:
-                    segments = [text]
+            if decorated_chain:
+                if segmented:
+                    logger.info(
+                        f"[主动消息] 分段回复已启用，将发送 {len(send_chain)} 条消息喵。"
+                    )
 
-                logger.info(
-                    f"[主动消息] 分段回复已启用，将发送 {len(segments)} 条消息喵。"
-                )
+                if segmented:
+                    # 分段顺序发送，段间按策略等待，模拟自然输出节奏。
+                    for idx, comp in enumerate(send_chain):
+                        if await self._send_chain(session_id, event, [comp]) is True:
+                            any_sent = True
+                        if idx < len(send_chain) - 1:
+                            interval = await self._calc_interval(
+                                getattr(comp, "text", "") or "", seg_conf
+                            )
+                            logger.debug(
+                                f"[主动消息] 分段回复等待 {interval:.2f} 秒喵。"
+                            )
+                            await asyncio.sleep(interval)
+                elif await self._send_chain(session_id, event, send_chain) is True:
+                    any_sent = True
+
                 if self.telemetry and self.telemetry.enabled:
                     # 这里只记录分段数、文本长度、TTS 开关等统计值，不上传任何消息正文内容。
+                    # success 取真实发送结果，避免未送达仍上报成功。
                     self._track_task(
                         asyncio.create_task(
                             self.telemetry.track_feature(
@@ -448,50 +671,39 @@ class SenderMixin:
                                         tts_conf.get("enable_tts", True)
                                     ),
                                     "tts_sent": is_tts_sent,
-                                    "segmented_enabled": True,
-                                    "segment_count": len(segments),
+                                    "segmented_enabled": segmented,
+                                    "segment_count": len(send_chain),
                                     "text_length": len(text),
-                                    "success": True,
+                                    "success": any_sent,
                                 },
                             )
                         )
                     )
 
-                # 分段顺序发送，段间按策略等待，模拟自然输出节奏
-                for idx, seg in enumerate(segments):
-                    await self._send_chain_with_hooks(session_id, [Plain(text=seg)])
-                    if idx < len(segments) - 1:
-                        interval = await self._calc_interval(seg, seg_conf)
-                        logger.debug(f"[主动消息] 分段回复等待 {interval:.2f} 秒喵。")
-                        await asyncio.sleep(interval)
-            else:
-                await self._send_chain_with_hooks(session_id, [Plain(text=text)])
-                if self.telemetry and self.telemetry.enabled:
-                    # 非分段文本发送同样记录统一的发送统计，便于后续比较不同发送策略的使用占比。
-                    self._track_task(
-                        asyncio.create_task(
-                            self.telemetry.track_feature(
-                                "message_send_result",
-                                {
-                                    "session_type": session_config.get(
-                                        "_session_type", "unknown"
-                                    ),
-                                    "tts_enabled": bool(
-                                        tts_conf.get("enable_tts", True)
-                                    ),
-                                    "tts_sent": is_tts_sent,
-                                    "segmented_enabled": False,
-                                    "segment_count": 1,
-                                    "text_length": len(text),
-                                    "success": True,
-                                },
-                            )
-                        )
-                    )
+        # 发送后钩子：装饰器可据此补发延迟内容（如分段表情图片）。
+        # 钩子内通过 event.send() 补发的消息会由事件层自动补写平台流水，
+        # 因此同样能被后续主动消息的上下文来源读取。
+        if event is not None and EventType is not None:
+            try:
+                await dispatch_event_hook(event, EventType.OnAfterMessageSentEvent)
+            except Exception as e:
+                logger.error(f"[主动消息] 派发发送后钩子失败喵: {e}")
 
-        # Bot 在群聊发言后需要重置沉默计时
-        if "group" in session_id.lower():
+        # 清理结果残留，与官方 respond 阶段的收尾语义保持一致，
+        # 避免事件被复用（或异常重试）时携带上一轮的消息链。
+        self._clear_event_result(event)
+
+        if not any_sent:
+            logger.error(
+                f"[主动消息] {self._get_session_log_str(session_id, session_config)} 的主动消息未能送达任何平台喵。"
+            )
+            return False
+
+        # Bot 在群聊发言后需要重置沉默计时。
+        # 仅在确实送达后才重置，避免未送达也把群聊沉默倒计时推迟。
+        if is_group_session(session_id):
             await self._reset_group_silence_timer(session_id)
             logger.info(
                 f"[主动消息] Bot主动消息已发送，已重置 {self._get_session_log_str(session_id, session_config)} 的沉默倒计时喵。"
             )
+        return True
