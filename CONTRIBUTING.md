@@ -106,6 +106,7 @@
 - @Soulter: "创世神"，伟大无需多言。感谢他提供了一个这么好的平台，以及对 AstrBot 的持续维护。
 - @Aloys233: 为本插件提供通知系统、遥测系统等远端服务支持，以及众多日常开发中的便利。
 - @Sisyphbaous-DT-Project: 为主动消息提供了更灵活的上下文来源选择。
+- @coco292931: 发现并修复了部分场景下主动消息的异常调度问题。
 - @Ayleovelle: 优化了 WebUI 加载与依赖相关问题。
 - @Alaye-Dong & @TheFurnia: 帮助修订文档。
 - @NickWoluff: 提供了解决主动消息插件无法与部分插件兼容使用的问题的思路，并帮忙测试插件。
@@ -122,6 +123,7 @@
 - @Gemini-3.0-Flash
 - @Gemini-3.0-Pro
 - @Gemini-3.1-Pro
+- @Gemini-3.7-Flash
 - @GPT-5.3-Codex
 - @GPT-5.4
 - @GPT-5.5
@@ -129,8 +131,11 @@
 - @Kimi-For-Coding
 - @DeepSeek-v3.2-exp
 - @DeepSeek-v3.2
+- @DeepSeek-v4.1-flash
 - @Doubao-Seedream-3.0-t2i
+- @coderabbitai[bot]
 - @sourcery-ai[bot]
+- @qodo-free-for-open-source-projects[bot]
 - @dosubot[bot]
 - @gemini-code-assist[bot]
 - @kilo-code-bot[bot]
