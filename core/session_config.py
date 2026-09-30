@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
 
 
 class ConfigMixin:

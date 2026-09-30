@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 from datetime import datetime
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
 from astrbot.core.agent.message import (
     AssistantMessageSegment,
     TextPart,
@@ -17,6 +18,7 @@ from astrbot.core.agent.message import (
 )
 
 from ..utils.time_utils import is_quiet_time
+from .log_center import emit, traced_task, run_update
 
 
 class ProactiveCoreMixin:
@@ -45,15 +47,48 @@ class ProactiveCoreMixin:
     async def _is_chat_allowed(self, session_id: str) -> tuple[bool, str]:
         """检查是否允许进行主动聊天，并返回阻断原因。"""
         session_config = self._get_session_config(session_id)
+        emit(
+            self,
+            "condition_checked",
+            session_id=session_id,
+            condition="session_config_present",
+            value=bool(session_config),
+            expected=True,
+            allowed=bool(session_config),
+        )
         # 会话未配置或已禁用时，直接阻止本轮主动消息
         if not session_config:
             return False, "session_config_missing"
+        emit(
+            self,
+            "condition_checked",
+            session_id=session_id,
+            condition="session_enabled",
+            value=bool(session_config.get("enable", False)),
+            expected=True,
+            allowed=bool(session_config.get("enable", False)),
+        )
         if not session_config.get("enable", False):
             return False, "session_disabled"
 
         # 免打扰时段判断
         schedule_conf = session_config.get("schedule_settings", {})
-        if is_quiet_time(schedule_conf.get("quiet_hours", "1-7"), self.timezone):
+        quiet_window = schedule_conf.get("quiet_hours", "1-7")
+        quiet = is_quiet_time(quiet_window, self.timezone)
+        quiet_match = re.fullmatch(r"([0-9]{1,2})-([0-9]{1,2})", str(quiet_window))
+        emit(
+            self,
+            "condition_checked",
+            session_id=session_id,
+            condition="quiet_hours_active",
+            quiet_start=int(quiet_match[1]) if quiet_match else None,
+            quiet_end=int(quiet_match[2]) if quiet_match else None,
+            timezone=getattr(self.timezone, "key", "system_local"),
+            value=quiet,
+            expected=False,
+            allowed=not quiet,
+        )
+        if quiet:
             return False, "quiet_hours"
 
         return True, "allowed"
@@ -144,6 +179,7 @@ class ProactiveCoreMixin:
         # 对话历史会作为后续 LLM 上下文，写入空文本会破坏上下文结构，
         # 也会让回读校验产生误导性告警。
         if not (assistant_response or "").strip():
+            run_update(history_outcome="skipped_no_text")
             logger.debug("[主动消息] 本次结果无文本内容，跳过对话历史存档喵。")
         else:
             try:
@@ -161,12 +197,15 @@ class ProactiveCoreMixin:
                 if await self._verify_message_persisted(
                     session_id, conv_id, assistant_response
                 ):
+                    emit(self, "history_verified")
                     logger.info("[主动消息] 已成功将本次主动消息存档至对话历史喵。")
                 else:
+                    emit(self, "history_unverified", "WARNING")
                     logger.warning(
                         "[主动消息] 本次主动消息已提交存档，但回读校验未命中末尾记录喵，请检查对话历史持久化是否正常喵。"
                     )
             except Exception as e:
+                emit(self, "history.failed", "WARNING", exception=e)
                 logger.error(f"[主动消息] 存档对话历史失败喵: {e}")
                 logger.warning("[主动消息] 对话存档失败喵，但会继续执行后续步骤喵。")
 
@@ -186,6 +225,13 @@ class ProactiveCoreMixin:
             self.session_data.setdefault(normalized_session_id, {})[
                 "unanswered_count"
             ] = new_unanswered_count
+            emit(
+                self,
+                "counter_updated",
+                session_id=normalized_session_id,
+                previous_count=unanswered_count,
+                unanswered_count=new_unanswered_count,
+            )
             logger.info(
                 f"[主动消息] {self._get_session_log_str(normalized_session_id)} 的第 {new_unanswered_count} 次主动消息已发送完成，当前未回复次数: {new_unanswered_count} 次喵。"
             )
@@ -204,6 +250,14 @@ class ProactiveCoreMixin:
                 )
                 # 私聊采用配置区间内随机间隔，减少触发规律性
                 random_interval = random.randint(min_interval, max_interval)
+                emit(
+                    self,
+                    "schedule_selected",
+                    session_id=normalized_session_id,
+                    min_interval_seconds=min_interval,
+                    max_interval_seconds=max_interval,
+                    chosen_interval_seconds=random_interval,
+                )
                 scheduled_at = time.time()
                 next_trigger_time = scheduled_at + random_interval
                 run_date = datetime.fromtimestamp(next_trigger_time, tz=self.timezone)
@@ -233,10 +287,12 @@ class ProactiveCoreMixin:
                 f"[主动消息] 已为 {self._get_session_log_str(normalized_session_id, scheduled_job_payload['session_config'])} 安排下一次主动消息喵，时间：{scheduled_job_payload['run_date'].strftime('%Y-%m-%d %H:%M:%S')} 喵。"
             )
 
+    @traced_task
     async def check_and_chat(self, session_id: str) -> None:
         """由定时任务触发的核心函数，完成一次完整的主动消息流程。"""
         # 在途任务在插件终止后应立即退出，避免重载期间发出幽灵主动消息。
         if getattr(self, "_terminating", False):
+            emit(self, "decision_skipped", reason="plugin_stopping")
             logger.debug("[主动消息] 插件正在终止，跳过本次 check_and_chat 喵。")
             return
 
@@ -246,7 +302,9 @@ class ProactiveCoreMixin:
             is_allowed, block_reason = await self._is_chat_allowed(
                 normalized_session_id
             )
+            emit(self, "decision_checked", allowed=is_allowed, reason=block_reason)
             if not is_allowed:
+                emit(self, "decision_skipped", reason=block_reason)
                 if block_reason == "quiet_hours":
                     logger.info("[主动消息] 当前为免打扰时段，跳过并重新调度喵。")
                 elif block_reason == "session_disabled":
@@ -276,7 +334,23 @@ class ProactiveCoreMixin:
                     "unanswered_count", 0
                 )
                 max_unanswered = schedule_conf.get("max_unanswered_times", 3)
+                emit(
+                    self,
+                    "limit_checked",
+                    unanswered_count=unanswered_count,
+                    limit=max_unanswered,
+                    allowed=not (
+                        max_unanswered > 0 and unanswered_count >= max_unanswered
+                    ),
+                )
                 if max_unanswered > 0 and unanswered_count >= max_unanswered:
+                    emit(
+                        self,
+                        "decision_skipped",
+                        reason="unanswered_limit",
+                        unanswered_count=unanswered_count,
+                        limit=max_unanswered,
+                    )
                     logger.info(
                         f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} 的未回复次数 ({unanswered_count}) 已达到上限 ({max_unanswered})，暂停主动消息喵。"
                     )
@@ -302,8 +376,20 @@ class ProactiveCoreMixin:
                 )
 
             # 准备上下文与人格（不绑定事件：上下文准备不需要钩子参与）
+            emit(self, "generation_started", unanswered_count=unanswered_count)
+            generation_started_at = time.monotonic()
             request_package = await self._prepare_llm_request(normalized_session_id)
+            emit(
+                self,
+                "context.prepared",
+                duration_ms=round((time.monotonic() - generation_started_at) * 1000),
+                outcome="available" if request_package else "unavailable",
+                history_count=len(request_package.get("history", []))
+                if request_package
+                else 0,
+            )
             if not request_package:
+                emit(self, "generation_empty", "WARNING", reason="context_unavailable")
                 await self._schedule_next_chat_and_save(normalized_session_id)
                 return
 
@@ -340,6 +426,15 @@ class ProactiveCoreMixin:
                 platform_context=request_package.get("platform_context", ""),
             )
             if not llm_response:
+                emit(
+                    self,
+                    "generation_empty",
+                    "WARNING",
+                    reason="no_response",
+                    duration_ms=round(
+                        (time.monotonic() - generation_started_at) * 1000
+                    ),
+                )
                 await self._schedule_next_chat_and_save(session_id)
                 return
 
@@ -347,7 +442,15 @@ class ProactiveCoreMixin:
             # 因此存档与发送都必须使用“钩子处理后”的最终形态。
             response_text = self._extract_response_text(llm_response)
             result_chain = self._extract_response_chain(llm_response)
+            emit(
+                self,
+                "generation_finished",
+                duration_ms=round((time.monotonic() - generation_started_at) * 1000),
+                text_length=len(response_text or ""),
+                component_count=len(result_chain or []),
+            )
             if not response_text and not result_chain:
+                emit(self, "generation_empty", "WARNING", reason="empty_result")
                 await self._schedule_next_chat_and_save(session_id)
                 return
 
@@ -368,6 +471,7 @@ class ProactiveCoreMixin:
             )
 
             if has_new_message:
+                emit(self, "decision_skipped", reason="new_user_message")
                 logger.info(
                     "[主动消息] 检测到用户在LLM生成期间发送了新消息，丢弃本次主动消息喵。"
                 )
@@ -375,12 +479,15 @@ class ProactiveCoreMixin:
 
             # 发送前再次确认终止状态：LLM 生成耗时较长，期间可能已收到终止指令。
             if getattr(self, "_terminating", False):
+                emit(self, "decision_skipped", reason="plugin_stopping")
                 logger.info("[主动消息] 插件正在终止，丢弃本次已生成的主动消息喵。")
                 return
 
             # 发送消息与收尾。
             # 传入原始消息链：它同时承载文本与非文本组件（如纯图片、
             # 或“文本 + 图片”的混合结果），只传文本会丢弃其中的媒体组件。
+            emit(self, "send_started")
+            send_started_at = time.monotonic()
             sent_ok = (
                 await self._send_proactive_message(
                     session_id,
@@ -391,6 +498,13 @@ class ProactiveCoreMixin:
                 is True
             )
 
+            emit(
+                self,
+                "send_result",
+                "INFO" if sent_ok else "WARNING",
+                outcome="flow_returned_true" if sent_ok else "failed_or_blocked",
+                duration_ms=round((time.monotonic() - send_started_at) * 1000),
+            )
             if not sent_ok:
                 # 未送达（平台/核心 API 均失败，或被装饰钩子如内容审核拦截）：
                 # 不写对话历史、不计入“已发送”次数，避免未送达内容污染后续上下文；
@@ -424,6 +538,7 @@ class ProactiveCoreMixin:
                         await self._save_data_internal()
 
         except Exception as e:
+            emit(self, "task_error", "ERROR", exception=e)
             error_type = type(e).__name__
             error_msg = str(e)
 
@@ -448,7 +563,19 @@ class ProactiveCoreMixin:
                 logger.info(
                     f"[主动消息] {self._get_session_log_str(session_id)} 的任务重新调度成功喵。"
                 )
+                emit(
+                    self,
+                    "retry.scheduled",
+                    retry_scope="next_run",
+                    same_operation=False,
+                    retry_delay_ms=None,
+                    unavailable_reason="not_measured",
+                )
             except Exception as se:
+                run_update(schedule_outcome="failed")
+                emit(
+                    self, "retry.failed", "ERROR", exception=se, retry_scope="next_run"
+                )
                 logger.error(f"[主动消息] 在错误处理中重新调度失败喵: {se}")
                 logger.error(
                     f"[主动消息] {self._get_session_log_str(session_id)} 可能需要手动干预喵。"

@@ -9,7 +9,7 @@ from typing import Any
 import aiofiles
 import aiofiles.os as aio_os
 
-from astrbot.api import logger
+from .plugin_logger import logger
 
 
 class StorageMixin:

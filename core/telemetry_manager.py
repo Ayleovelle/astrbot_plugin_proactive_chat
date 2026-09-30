@@ -16,7 +16,7 @@ from typing import Any
 
 import aiohttp
 
-from astrbot.api import logger
+from .plugin_logger import logger
 from astrbot.api.star import StarTools
 
 from ..utils.version import get_astrbot_version_info

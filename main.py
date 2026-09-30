@@ -10,7 +10,8 @@ import re
 import time
 
 import astrbot.api.star as star
-from astrbot.api import logger
+from .core.plugin_logger import logger, bind_log_center, unbind_log_center
+from .core.log_center import LogCenter
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
@@ -59,6 +60,9 @@ class ProactiveChatPlugin(
         # 使用 StarTools 获取插件专属数据目录（Path 对象）
         self.data_dir = star.StarTools.get_data_dir("astrbot_plugin_proactive_chat")
         self.session_data_file = self.data_dir / "session_data.json"
+        self.log_center = LogCenter(self.data_dir, self.config.get("log_center", {}))
+        bind_log_center(self.log_center)
+        self.log_center.record("started")
 
         # 共享锁与持久化数据容器
         self.data_lock = None
@@ -235,7 +239,11 @@ class ProactiveChatPlugin(
 
     async def terminate(self) -> None:
         """插件终止入口：委托 LifecycleMixin 清理。"""
-        await LifecycleMixin.terminate(self)
+        try:
+            await LifecycleMixin.terminate(self)
+        finally:
+            unbind_log_center(self.log_center)
+            await asyncio.to_thread(self.log_center.close)
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self) -> None:

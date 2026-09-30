@@ -11,7 +11,8 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import astrbot.api.star as star
-from astrbot.api import logger
+from .plugin_logger import logger
+from .log_center import cancel_requested
 
 
 class LifecycleMixin:
@@ -291,6 +292,7 @@ class LifecycleMixin:
 
         # 置位终止标志
         self._terminating = True
+        cancel_requested(self, source="plugin_shutdown")
 
         # 先同步取消尚未完成的延迟启动任务，避免终止后仍恢复出新的调度任务。
         startup_task = getattr(self, "_startup_task", None)

@@ -610,5 +610,35 @@
                 "hint": "启用后，插件会匿名上报配置统计与错误信息，用于帮助改进插件。不会上报会话列表、提示词和密码等敏感信息"
             }
         }
+    },
+    "log_center": {
+        "description": "📜 本地日志中心（测试版）",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用本地日志",
+                "type": "bool",
+                "default": true,
+                "hint": "仅保存本插件结构化事件与隐藏动态参数后的日志；重载插件生效"
+            },
+            "debug_enabled": {
+                "description": "记录 DEBUG 日志",
+                "type": "bool",
+                "default": false,
+                "hint": "排查问题时开启；仍不保存正文/提示词/动态参数；重载插件生效"
+            },
+            "retention_days": {
+                "description": "保留天数",
+                "type": "int",
+                "default": 7,
+                "hint": "限制 1–30 天；超期自动清理"
+            },
+            "max_entries": {
+                "description": "最多保留条数",
+                "type": "int",
+                "default": 10000,
+                "hint": "限制 100–50000 条；数据库最大 32 MiB，写入队列上限 1000 条"
+            }
+        }
     }
 }

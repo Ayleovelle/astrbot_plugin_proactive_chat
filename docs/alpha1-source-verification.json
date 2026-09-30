@@ -1,0 +1,262 @@
+{
+  "restoration_commit": "6e474aaee1a11de04712b6e0bffe682db810b2f3",
+  "verified_records": 42,
+  "distinct_paths": 41,
+  "checkout_rules": {
+    "run_ruff.bat": "Repository .gitattributes text eol=crlf: Git blob uses LF; original checkout bytes use CRLF."
+  },
+  "files": [
+    {
+      "path": "_conf_schema.json",
+      "bytes": 36568,
+      "sha256": "845c4c25e251575f73304967d452fe4437685733b6415006c524961801abc9c0",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/css/style.css",
+      "bytes": 91186,
+      "sha256": "c46c79eb974b9d5158c3e5e3355ee1e2bef8fe4a80c4969c0931cb08d4d50dec",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/index.html",
+      "bytes": 18777,
+      "sha256": "23f286d0f7e199e0f01eefecb89b5bad00cb20bc578cb0cf75c6475559abcedf",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/app.js",
+      "bytes": 13100,
+      "sha256": "64281d4d376cac628a59cb3c03494d0b3dd1de904ab3d6c04376955cdd6f3834",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/components/config/ConfigRenderer.js",
+      "bytes": 49806,
+      "sha256": "27ebbed4644ee5d63233a482385d4c0d752c6dae0a363c0875acc317abc1bbf3",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/components/layout/Header.js",
+      "bytes": 3979,
+      "sha256": "7bb5abd7927533cb986b92f6047d243beae607d4b29578fb921be1125f632a44",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/components/layout/Sidebar.js",
+      "bytes": 8287,
+      "sha256": "88dcc4d381debf5d21995635a54485acef9e68a94defc127d1db8477c8a10975",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/context/AppContext.js",
+      "bytes": 4619,
+      "sha256": "9ad187f71f7a619862fab37529c236ce136bebdf9ab2b2237ada6ff10f08c6ec",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/hooks/useApi.js",
+      "bytes": 3805,
+      "sha256": "04442040652370dd910c1b7d7794408e7c2a99359aefa71464490fc1aedc4feb",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/hooks/useWebSocket.js",
+      "bytes": 4495,
+      "sha256": "e0b6186c3d6c473db9f4b7df64edfd248ec7310ac71a024ee61d7a8e25ef85a3",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/utils/auth.js",
+      "bytes": 1644,
+      "sha256": "649336eb6e0e6dc43d55e928f984a62f797adda6c769c84ddf8ab5da938b0815",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/utils/formatters.js",
+      "bytes": 7707,
+      "sha256": "877ca15139716af04ec18b8ef87d0c379472f9b23e7f86a061e131a48cb6c99d",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/utils/http.js",
+      "bytes": 1684,
+      "sha256": "99e0c232997619a9e6a2227b71dd6af7a0b291f824b31d08e7bf1e5e5dea39e1",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/utils/markdown.js",
+      "bytes": 24559,
+      "sha256": "7420b94451bc1d2e2d4b0278a8382526f768fcd951858e839919c8c33caf2bef",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/views/ConfigView.js",
+      "bytes": 1378,
+      "sha256": "942cb25e41d65b9c4e8df39472afb62ad9cb0cbb3931b37b85a67193a3e44e89",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/views/LogsView.js",
+      "bytes": 20450,
+      "sha256": "2ad01c85c1924663b76513f3aeb025a1dba4b3ba4b37633e96a41105fc8cb096",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/views/MarkdownDocsView.js",
+      "bytes": 22359,
+      "sha256": "d573c740be574e0f5e3c825b0827b3321085310dbcb09dcadad2cbcd4e439200",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/views/NotificationsView.js",
+      "bytes": 12028,
+      "sha256": "0c4af76fd6fdd70bb147bc7b881387f695df7d42499b23033052022f7ba1bd51",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/views/StatusView.js",
+      "bytes": 25205,
+      "sha256": "67db8f816f7490a6e02b826f0d64b6edab1d0f6a8949dbed282e30df60f6b89c",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "admin/js/views/TasksView.js",
+      "bytes": 20075,
+      "sha256": "5c56d0bfeed8ac350410af728d5ad96a07e39f43f64931fe8b6ce43c3dc693c6",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/chat_flow.py",
+      "bytes": 26037,
+      "sha256": "3a0e8fcbc0a52f0973b5c65f87f44a591ca9aabca36b581efc715fde41e09308",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/data_storage.py",
+      "bytes": 6992,
+      "sha256": "95f71eb7fdb496d3ea11cc39e69170923512c8f23e7d478782ec2f59806b1e7f",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/llm_adapter.py",
+      "bytes": 54067,
+      "sha256": "7323fa763bcd227a89378891b581df9bd59d9fe29778c3048fc7775ca559f4af",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/log_center.py",
+      "bytes": 17439,
+      "sha256": "45c1c53b6b898aaad62f3be5f9d265471b1d11f60d17ee6b460fb3dae13a74db",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/message_events.py",
+      "bytes": 15658,
+      "sha256": "0db058ef2440399c4a95dccd0158bf255ae7f5314b2faaf361b64713a9afdd60",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/message_sender.py",
+      "bytes": 34141,
+      "sha256": "76cd3808507e900b083b0e3187bb7943c822cc629cce90bf9a21187e54155ca1",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/notification_center.py",
+      "bytes": 16971,
+      "sha256": "39a2e4a076236a52e78340115a5de926f9a2585f4294196decd6aef3dd7a5110",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/plugin_lifecycle.py",
+      "bytes": 18658,
+      "sha256": "54a7ea5c4767e28443b6f9c5ab482b9b2d950bbf4493212fb36a3214ec61b7e0",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/plugin_logger.py",
+      "bytes": 3765,
+      "sha256": "4f9263b00c1485f2b147873a5907ece66642891196781c64b5e81dd31e928de7",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/proactive_event.py",
+      "bytes": 25484,
+      "sha256": "6a1e2f204a30597c622be1402f572f7b3828bb12afd46a0a007191a73d0ee48f",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/session_config.py",
+      "bytes": 5624,
+      "sha256": "51c7ee5b779b73b45e241b4fa83ebfb356119b087c267cd3786b29c69778fa0e",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/session_override_manager.py",
+      "bytes": 6284,
+      "sha256": "ae03ff9c0c95b434f2a6b4ef9fbc5a3dde989dea498d297673548e0531bcccbc",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/task_scheduler.py",
+      "bytes": 35455,
+      "sha256": "3508acea76890ff0de67b090f39fbe8b0e361598b1121972842e593bc5ef92cd",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/telemetry_manager.py",
+      "bytes": 24101,
+      "sha256": "b7bf3f160dfb65ecc6c3ef8d2771a1dddf00ba5f7fb655f3aba333b23d0ec546",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "core/web_admin_server.py",
+      "bytes": 70691,
+      "sha256": "9f85ca40388d469a013b892e6041a691e2a1cb9c3717d21b002863c270ab38ec",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "docs/log-center-alpha1.md",
+      "bytes": 9367,
+      "sha256": "80e670df4d2743ef765d25a87f804c76f29ac7a79e5de1a28b76264e57a6af10",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "main.py",
+      "bytes": 13279,
+      "sha256": "9ea3bdf51edcb25db269103b0cdae61c0a70e3a630a7a537e119f5c50d2ba1b7",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "metadata.yaml",
+      "bytes": 644,
+      "sha256": "5c245b7ada0ff22b59104f7ff32306c60ade7d9f18565a6be9082ab1233a5961",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "run_ruff.bat",
+      "bytes": 4492,
+      "sha256": "0e424715a29a2063fb8482702d0c8bdbf48e0bb7c4193ddbbbfba77f01e96e8d",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "tests/test_log_center.py",
+      "bytes": 23914,
+      "sha256": "41a467e2d51499aebfe0aa2d217acb0f1a05acfb24bfe39e3227015a65e07939",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "utils/version.py",
+      "bytes": 6345,
+      "sha256": "ec626c07d45b3e907761fd0c3f338a5108fb3ad311fb27187c19edc81634e992",
+      "origin": "delivered_alpha1_zip"
+    },
+    {
+      "path": "tests/test_log_center.py",
+      "bytes": 23914,
+      "sha256": "41a467e2d51499aebfe0aa2d217acb0f1a05acfb24bfe39e3227015a65e07939",
+      "origin": "retained_alpha1_workspace_test_not_in_zip"
+    }
+  ]
+}

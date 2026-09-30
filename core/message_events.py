@@ -5,7 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
+from .log_center import emit
 from astrbot.api.event import AstrMessageEvent
 
 
@@ -286,6 +287,13 @@ class EventsMixin:
                     "unanswered_count", 0
                 )
                 self.session_data[normalized_session_id]["unanswered_count"] = 0
+                emit(
+                    self,
+                    "counter_reset",
+                    session_id=normalized_session_id,
+                    previous_count=current_unanswered,
+                    unanswered_count=0,
+                )
                 changed = True
                 if current_unanswered > 0:
                     logger.debug(

@@ -15,10 +15,12 @@ import math
 import random
 import re
 import traceback
+import time
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
+from .log_center import emit, observed_send, send_operation, send_segment
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import (
     MessageChain,
@@ -380,6 +382,7 @@ class SenderMixin:
     # ------------------------------------------------------------------
     # 发送
     # ------------------------------------------------------------------
+    @send_operation
     async def _send_chain_direct(self, session_id: str, components: list) -> bool:
         """直接通过平台实例发送消息链（不经过事件）。
 
@@ -419,13 +422,54 @@ class SenderMixin:
             logger.warning(f"[主动消息] 平台 {p_id} 未运行喵，跳过主动消息喵。")
             return False
 
+        api_started = False
         try:
             session_obj = MS(platform_name=p_id, message_type=m_type, session_id=t_id)
-            await target_platform.send_by_session(session_obj, chain)
+            send_started_at = time.monotonic()
+            api_started = True
+            platform_result = await observed_send(
+                self,
+                "platform",
+                lambda: target_platform.send_by_session(session_obj, chain),
+            )
+            emit(
+                self,
+                "send_api_result",
+                session_id=session_id,
+                route="platform",
+                outcome="explicit_success"
+                if platform_result is True
+                else (
+                    "explicit_failure"
+                    if platform_result is False
+                    else "returned_without_receipt"
+                ),
+                duration_ms=round((time.monotonic() - send_started_at) * 1000),
+            )
             logger.debug(f"[主动消息] 消息将通过平台 {p_id} 送达喵")
             await self._persist_proactive_message_to_platform_history(session_id, chain)
             return True
         except Exception as e:
+            if not api_started:
+                emit(
+                    self,
+                    "fallback.scheduled",
+                    "WARNING",
+                    route="platform_to_core",
+                    reason="unavailable",
+                    duplicate_risk=False,
+                    exception=e,
+                )
+                return await self._send_chain_via_core_api(session_id, chain)
+            emit(
+                self,
+                "fallback.suppressed",
+                "WARNING",
+                session_id=session_id,
+                route="platform_to_core",
+                outcome="unknown_after_exception",
+                exception=e,
+            )
             logger.error(f"[主动消息] 通过平台 {p_id} 发送失败喵: {e}")
             logger.debug(traceback.format_exc())
             if self.telemetry and self.telemetry.enabled:
@@ -438,8 +482,9 @@ class SenderMixin:
                         )
                     )
                 )
-            return await self._send_chain_via_core_api(session_id, chain)
+            return False
 
+    @send_operation
     async def _send_chain_via_core_api(
         self, session_id: str, chain: MessageChain
     ) -> bool:
@@ -451,8 +496,35 @@ class SenderMixin:
             True 表示已成功送达；False 表示未送达。
         """
         try:
-            result = await self.context.send_message(session_id, chain)
+            send_started_at = time.monotonic()
+            result = await observed_send(
+                self, "core", lambda: self.context.send_message(session_id, chain)
+            )
+            emit(
+                self,
+                "send_api_result",
+                "WARNING" if result is False else "INFO",
+                session_id=session_id,
+                route="core",
+                outcome="explicit_success"
+                if result is True
+                else (
+                    "explicit_failure"
+                    if result is False
+                    else "returned_without_receipt"
+                ),
+                duration_ms=round((time.monotonic() - send_started_at) * 1000),
+            )
         except Exception as e:
+            emit(
+                self,
+                "send_api_result",
+                "ERROR",
+                session_id=session_id,
+                route="core",
+                outcome="unknown_after_exception",
+                exception=e,
+            )
             logger.error(f"[主动消息] 核心 API 发送失败喵: {e}")
             return False
 
@@ -465,6 +537,7 @@ class SenderMixin:
         await self._persist_proactive_message_to_platform_history(session_id, chain)
         return True
 
+    @send_operation
     async def _send_chain(
         self,
         session_id: str,
@@ -485,17 +558,39 @@ class SenderMixin:
             try:
                 # 事件发送内部已在成功送达后补写平台流水，
                 # 因此这里不再重复补写，避免同一条消息被写入两次。
-                sent = await event.send(chain)
+                send_started_at = time.monotonic()
+                sent = (
+                    await event.send(chain)
+                    if getattr(event, "_proactive_plugin", None) is not None
+                    else await observed_send(self, "event", lambda: event.send(chain))
+                )
+                emit(
+                    self,
+                    "send_api_result",
+                    "WARNING" if sent is False or sent is None else "INFO",
+                    session_id=session_id,
+                    route="event",
+                    outcome="explicit_success"
+                    if sent is True
+                    else (
+                        "explicit_failure" if sent is False else "unknown_no_receipt"
+                    ),
+                    duration_ms=round((time.monotonic() - send_started_at) * 1000),
+                )
             except Exception as e:
-                # 仅“抛出异常”才回退直发：此时送达状态未知
-                # （可能已投递但响应超时），值得再用直发路径尝试一次。
-                logger.error(f"[主动消息] 事件发送异常喵，回退平台直发: {e}")
-                sent_direct = await self._send_chain_direct(session_id, components)
-                if sent_direct:
-                    self._mark_event_sent(event)
-                else:
-                    self._mark_event_send_failed(event)
-                return sent_direct
+                # 超时或异常不能证明未投递；停止回退避免重复发送。
+                emit(
+                    self,
+                    "fallback.suppressed",
+                    "WARNING",
+                    session_id=session_id,
+                    route="event_to_platform",
+                    outcome="unknown_after_exception",
+                    exception=e,
+                )
+                logger.error(f"[主动消息] 事件发送异常喵，状态未知，停止回退: {e}")
+                self._mark_event_send_failed(event)
+                return False
 
             if sent is True:
                 return True
@@ -516,6 +611,7 @@ class SenderMixin:
 
         return await self._send_chain_direct(session_id, components)
 
+    @send_operation
     async def _send_proactive_message(
         self,
         session_id: str,
@@ -561,6 +657,7 @@ class SenderMixin:
         # 先尝试 TTS：成功后是否继续发文本由 always_send_text 控制。
         # TTS 属于发送形态转换，不参与文本装饰，避免装饰器把语音再转成文本。
         is_tts_sent = False
+        tts_attempted = False
         if tts_conf.get("enable_tts", True) and text.strip():
             try:
                 logger.info("[主动消息] 尝试进行手动TTS喵。")
@@ -570,6 +667,8 @@ class SenderMixin:
                     if audio_path:
                         # 只有真正送达才视为已发送 TTS；
                         # 否则按配置继续尝试发送文本，避免整轮静默丢失。
+                        tts_attempted = True
+                        send_segment(1, None)
                         is_tts_sent = (
                             await self._send_chain(
                                 session_id, event, [Record(file=audio_path)]
@@ -620,6 +719,13 @@ class SenderMixin:
                 event, base_components
             )
             if not should_send:
+                emit(
+                    self,
+                    "send_blocked",
+                    "WARNING",
+                    session_id=session_id,
+                    reason="decorating_hook",
+                )
                 self._clear_event_result(event)
                 return False
             if not decorated_chain:
@@ -634,6 +740,13 @@ class SenderMixin:
                 # 仅当分段导致组件数量变化时，才认为确实执行了分段。
                 segmented = len(send_chain) != len(decorated_chain)
 
+            emit(
+                self,
+                "send.prepared",
+                segment_count=(len(send_chain) if segmented else int(bool(send_chain)))
+                + int(tts_attempted),
+                component_count=len(send_chain),
+            )
             if decorated_chain:
                 if segmented:
                     logger.info(
@@ -643,6 +756,10 @@ class SenderMixin:
                 if segmented:
                     # 分段顺序发送，段间按策略等待，模拟自然输出节奏。
                     for idx, comp in enumerate(send_chain):
+                        send_segment(
+                            idx + 1 + int(tts_attempted),
+                            len(send_chain) + int(tts_attempted),
+                        )
                         if await self._send_chain(session_id, event, [comp]) is True:
                             any_sent = True
                         if idx < len(send_chain) - 1:
@@ -653,8 +770,10 @@ class SenderMixin:
                                 f"[主动消息] 分段回复等待 {interval:.2f} 秒喵。"
                             )
                             await asyncio.sleep(interval)
-                elif await self._send_chain(session_id, event, send_chain) is True:
-                    any_sent = True
+                else:
+                    send_segment(1 + int(tts_attempted), 1 + int(tts_attempted))
+                    if await self._send_chain(session_id, event, send_chain) is True:
+                        any_sent = True
 
                 if self.telemetry and self.telemetry.enabled:
                     # 这里只记录分段数、文本长度、TTS 开关等统计值，不上传任何消息正文内容。
