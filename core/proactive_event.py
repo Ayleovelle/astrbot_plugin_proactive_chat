@@ -28,7 +28,7 @@ import uuid
 from typing import Any
 
 from .plugin_logger import logger
-from .log_center import emit
+from .log_center import emit, hook_failed, observed_send, send_operation
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -239,12 +239,22 @@ async def dispatch_event_hook(
     if event is None or hook_type is None or star_handlers_registry is None:
         return False
 
+    hook_name = getattr(hook_type, "name", "")
+    route = (
+        "response_hook"
+        if hook_name == "OnLLMResponseEvent"
+        else "decorating_hook"
+        if hook_name == "OnDecoratingResultEvent"
+        else "request_hook"
+    )
+
     try:
         handlers = star_handlers_registry.get_handlers_by_event_type(
             hook_type,
             plugins_name=getattr(event, "plugins_name", None),
         )
     except Exception as e:  # pragma: no cover - 防御性兜底
+        hook_failed(getattr(event, "_proactive_plugin", None), route, e)
         logger.debug(f"[主动消息] 获取事件钩子列表失败喵: {e}")
         return False
 
@@ -262,6 +272,7 @@ async def dispatch_event_hook(
                 continue
             await handler.handler(event, *args, **kwargs)
         except Exception as e:
+            hook_failed(getattr(event, "_proactive_plugin", None), route, e)
             logger.error(
                 f"[主动消息] 执行钩子失败喵！来源: {handler_name}, "
                 f"错误类型: {type(e).__name__}, 错误详情: {e}\n"
@@ -364,6 +375,7 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
     # ------------------------------------------------------------------
     # 发送能力
     # ------------------------------------------------------------------
+    @send_operation
     async def send(self, message: MessageChain) -> bool:  # type: ignore[override]
         """发送消息到目标平台。
 
@@ -389,6 +401,7 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
             if MessageSession is None:  # pragma: no cover - 极旧版本
                 sent = await self._send_via_core_api(message)
             else:
+                api_started = False
                 try:
                     session_obj = MessageSession(
                         platform_name=platform.meta().id,
@@ -400,7 +413,12 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
                         session_id=self._proactive_target_id,
                     )
                     started_at = time.monotonic()
-                    result = await platform.send_by_session(session_obj, message)
+                    api_started = True
+                    result = await observed_send(
+                        plugin,
+                        "event_platform",
+                        lambda: platform.send_by_session(session_obj, message),
+                    )
                     emit(
                         plugin,
                         "send_api_result",
@@ -419,14 +437,17 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
                 except Exception as e:
                     emit(
                         plugin,
-                        "send_fallback",
+                        "fallback.suppressed" if api_started else "fallback.scheduled",
                         "WARNING",
                         session_id=self._proactive_umo,
-                        route="event_platform_to_core",
+                        route="platform_to_core",
                         outcome="unknown_after_exception",
                         exception=e,
                     )
-                    logger.error(f"[主动消息] 平台发送失败喵，尝试核心 API 兜底: {e}")
+                    logger.error(f"[主动消息] 平台发送异常喵，状态未知，停止回退: {e}")
+                    if api_started:
+                        self.proactive_send_failed = True
+                        return False
 
         if not sent:
             sent = await self._send_via_core_api(message)
@@ -453,7 +474,11 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
             return False
         try:
             started_at = time.monotonic()
-            result = await plugin.context.send_message(self._proactive_umo, message)
+            result = await observed_send(
+                plugin,
+                "event_core",
+                lambda: plugin.context.send_message(self._proactive_umo, message),
+            )
             emit(
                 plugin,
                 "send_api_result",

@@ -1,5 +1,7 @@
 # 主动消息 · 详细日志中心 alpha1 测试说明
 
+> 本文保留原 alpha1 测试包的历史说明。当前 alpha2 的发送语义、控制台脱敏、输入核验与最新测试范围见 [alpha2 说明](log-center-alpha2.md)。
+
 版本：v1.2.6+logcenter.alpha1  
 基于：Pancakes-Labs/astrbot_plugin_proactive_chat 的 635fc18eeb84e3c7b58661425359244552286835（v1.2.6）  
 性质：个人本地测试包，不是上游正式版本；没有推送仓库或创建 PR。

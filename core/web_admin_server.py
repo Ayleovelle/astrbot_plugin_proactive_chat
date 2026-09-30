@@ -131,7 +131,10 @@ class WebAdminServer:
         async def auth_middleware(request: Request, call_next):
             # 未启用密码保护时，所有请求直接放行。
             if not self._auth_enabled:
-                return await call_next(request)
+                response = await call_next(request)
+                if request.url.path.startswith("/api/logs"):
+                    response.headers["Cache-Control"] = "no-store"
+                return response
 
             path = request.url.path
             # 登录接口与鉴权信息探测接口必须允许匿名访问，否则前端无法完成登录。
@@ -145,14 +148,25 @@ class WebAdminServer:
             # API 请求统一使用 Bearer Token 认证，避免把 token 暴露在 query 参数里。
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
-                return JSONResponse({"error": "未授权"}, status_code=401)
+                return JSONResponse(
+                    {"error": "未授权"},
+                    status_code=401,
+                    headers={"Cache-Control": "no-store"},
+                )
 
             token = auth_header[7:]
             # 令牌不存在、已过期或不合法时，返回 401 让前端重新登录。
             if not self._verify_token(token):
-                return JSONResponse({"error": "登录已过期"}, status_code=401)
+                return JSONResponse(
+                    {"error": "登录已过期"},
+                    status_code=401,
+                    headers={"Cache-Control": "no-store"},
+                )
 
-            return await call_next(request)
+            response = await call_next(request)
+            if path.startswith("/api/logs"):
+                response.headers["Cache-Control"] = "no-store"
+            return response
 
         # 路由与静态资源挂载分开处理，方便后续维护。
         self._register_routes()
@@ -206,7 +220,9 @@ class WebAdminServer:
             return JSONResponse({"error": "logo not found"}, status_code=404)
 
         @self.app.get("/api/logs")
+        @self.app.get("/api/logs/export")
         async def get_logs(
+            request: Request,
             min_level: str = "INFO",
             category: str = "",
             session_id: str = Query(default="", max_length=256),
@@ -215,33 +231,106 @@ class WebAdminServer:
             until: float | None = Query(default=None, ge=0, le=32503680000),
             before_id: int | None = Query(default=None, ge=1),
             limit: int = Query(default=50, ge=1, le=100),
+            snapshot_max_id: int | None = Query(default=None, ge=0),
+            event_name: str = Query(default="", max_length=64),
+            outcome: str = Query(default="", max_length=32),
+            reason_code: str = Query(default="", max_length=64),
+            provider_ref: str = Query(default="", max_length=32),
+            operation_id: str = Query(default="", max_length=32),
+            error_category: str = Query(default="", max_length=32),
         ):
             center = getattr(self.plugin, "log_center", None)
             if not center:
                 return JSONResponse(
-                    {"error": "日志中心不可用，请重载插件"}, status_code=503
+                    {"error": "日志中心不可用，请重载插件"},
+                    status_code=503,
+                    headers={"Cache-Control": "no-store"},
                 )
+            filters = dict(
+                min_level=min_level,
+                category=category,
+                session_id=session_id,
+                trace_id=trace_id,
+                since=since,
+                until=until,
+                snapshot_max_id=snapshot_max_id,
+                event_name=event_name,
+                outcome=outcome,
+                reason_code=reason_code,
+                provider_ref=provider_ref,
+                operation_id=operation_id,
+                error_category=error_category,
+            )
             try:
-                result = await asyncio.to_thread(
-                    center.query,
-                    min_level=min_level,
-                    category=category,
-                    session_id=session_id,
-                    trace_id=trace_id,
-                    since=since,
-                    until=until,
-                    before_id=before_id,
-                    limit=limit,
+                exporting = request.url.path.endswith("/export")
+                result = (
+                    await asyncio.to_thread(center.export, **filters)
+                    if exporting
+                    else await asyncio.to_thread(
+                        center.query, **filters, before_id=before_id, limit=limit
+                    )
                 )
+                if result["meta"].get("storage_error"):
+                    return JSONResponse(
+                        {"error": "日志存储暂时不可读", "meta": result["meta"]},
+                        status_code=503,
+                        headers={"Cache-Control": "no-store"},
+                    )
                 return JSONResponse(result, headers={"Cache-Control": "no-store"})
-            except ValueError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
+            except ValueError:
+                return JSONResponse(
+                    {"error": "无效日志筛选条件"},
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
             except Exception:
-                # Do not journal journal-reading failures or expose SQLite paths.
                 return JSONResponse(
                     {"error": "日志存储暂时不可读，请检查磁盘或稍后重试"},
                     status_code=503,
+                    headers={"Cache-Control": "no-store"},
                 )
+
+        @self.app.get("/api/logs/trace/{run_id}")
+        async def get_log_trace(run_id: str):
+            center = getattr(self.plugin, "log_center", None)
+            if not center:
+                return JSONResponse({"error": "日志中心不可用"}, status_code=503)
+            try:
+                result = await asyncio.to_thread(
+                    center.collect,
+                    cap=center.max_entries,
+                    trace_id=run_id,
+                    min_level="DEBUG",
+                )
+                if result["meta"].get("storage_error"):
+                    return JSONResponse(
+                        {"error": "日志存储暂时不可读", "meta": result["meta"]},
+                        status_code=503,
+                    )
+                result["items"].reverse()
+                return JSONResponse(result, headers={"Cache-Control": "no-store"})
+            except Exception:
+                return JSONResponse({"error": "链路暂时不可读"}, status_code=503)
+
+        @self.app.get("/api/logs/detail/{entry_id}")
+        async def get_log_detail(entry_id: int):
+            center = getattr(self.plugin, "log_center", None)
+            if not center:
+                return JSONResponse({"error": "日志中心不可用"}, status_code=503)
+            try:
+                result = await asyncio.to_thread(
+                    center.query, min_level="DEBUG", snapshot_max_id=entry_id, limit=1
+                )
+                item = next(
+                    (item for item in result["items"] if item["id"] == entry_id), None
+                )
+                return JSONResponse(
+                    item or {"error": "记录不存在或已清理"},
+                    status_code=200 if item else 404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            except Exception:
+                return JSONResponse({"error": "记录暂时不可读"}, status_code=503)
 
         @self.app.get("/api/status")
         async def get_status():
@@ -675,6 +764,13 @@ class WebAdminServer:
         @self.app.delete("/api/jobs/{umo:path}")
         async def cancel_job(umo: str):
             normalized = self.plugin._normalize_session_id(umo)
+            center = getattr(self.plugin, "log_center", None)
+            if center:
+                center.record(
+                    "cancel.requested",
+                    session_id=normalized,
+                    details={"cancel_source": "manual_cancel"},
+                )
             removed = False
             try:
                 # APScheduler 中的 job id 直接使用规范化后的 session id。

@@ -47,7 +47,7 @@
     session_id: '',
     trace_id: '',
     since: '',
-    until: ''
+    until: '', event_name: '', outcome: '', reason_code: '', provider_ref: '', operation_id: '', error_category: ''
   });
   const color = level => ({
     DEBUG: 'default',
@@ -76,11 +76,18 @@
     if (d.source_mode) parts.push(`上下文 ${d.source_mode}`, `历史 ${d.history_count} 条`, `平台 ${d.platform_records} 条`, `注入 ${d.injected_count} 条`);
     if (d.chosen_interval_seconds !== undefined) parts.push(`候选 ${d.min_interval_seconds}–${d.max_interval_seconds} 秒`, `随机选择 ${d.chosen_interval_seconds} 秒`);
     if (d.text_length !== undefined) parts.push(`文本长度 ${d.text_length}`, `组件 ${d.component_count ?? '未知'}`);
+    if (d.execution_outcome) parts.push(`执行：${({completed:'完成', skipped:'策略跳过', failed:'失败', cancelled:'已取消', interrupted_or_unknown:'中断或未知'})[d.execution_outcome] || d.execution_outcome}`);
+    if (d.delivery_outcome) parts.push(`投递证据：${({accepted:'接口接受（终端送达未确认）', explicit_failure:'明确失败', partial_success:'部分成功', delivery_unknown:'未知', not_attempted:'未尝试'})[d.delivery_outcome] || d.delivery_outcome}`, `接受 ${d.accepted_segments ?? '未知'} / 失败 ${d.failed_segments ?? '未知'} / 未知 ${d.unknown_segments ?? '未知'}`);
+    if (d.segment_index !== undefined) parts.push(`第 ${d.segment_index}/${d.segment_count ?? '未知'} 段 · attempt ${d.attempt_no}`);
+    if (d.provider_ref) parts.push(`Provider ${d.provider_ref}`);
+    if (d.delivery_unknown) parts.push('存在未知投递，禁止重发');
+    if (d.incomplete) parts.push('记录不完整');
+    if (d.quiet_start !== undefined) parts.push(`免扰 ${known(d.quiet_start)}–${known(d.quiet_end)} 时 · ${d.timezone || '时区未知'}`);
     if (d.route) parts.push(`路径 ${d.route}`);
     if (d.duration_ms !== undefined) parts.push(`耗时 ${known(d.duration_ms)} ms`);
     return parts.join(' · ');
   }
-  function paramsFor(filters, cursor, limit = 50) {
+  function paramsFor(filters, cursor, limit = 50, snapshot) {
     const params = new URLSearchParams({
       limit: String(limit)
     });
@@ -88,11 +95,12 @@
       if (!value) return;
       params.set(key, key === 'since' || key === 'until' ? String(new Date(value).getTime() / 1000) : value);
     });
+    if (snapshot !== null && snapshot !== undefined) params.set('snapshot_max_id', String(snapshot));
     if (cursor) params.set('before_id', String(cursor));
     return params;
   }
-  async function requestLogs(filters, cursor, limit = 50, signal) {
-    const response = await fetch('/api/logs?' + paramsFor(filters, cursor, limit), {
+  async function requestLogs(filters, cursor, limit = 50, signal, snapshot) {
+    const response = await fetch('/api/logs?' + paramsFor(filters, cursor, limit, snapshot), {
       headers: window.AuthUtil.withAuthHeaders({}),
       signal,
       cache: 'no-store'
@@ -113,6 +121,11 @@
     const [selected, setSelected] = React.useState(null);
     const [exporting, setExporting] = React.useState(false);
     const [notice, setNotice] = React.useState('');
+    const [tracePayload, setTracePayload] = React.useState(null);
+    const [traceLoading, setTraceLoading] = React.useState(false);
+    const snapshot = React.useRef(null);
+    const generation = React.useRef(0);
+    const traceController = React.useRef(null);
     const page = cursors.length;
     const cursor = cursors[page - 1];
     const mounted = React.useRef(true);
@@ -120,32 +133,42 @@
       mounted.current = true;
       return () => {
         mounted.current = false;
+        traceController.current?.abort();
       };
     }, []);
     React.useEffect(() => {
       const controller = new AbortController();
       setLoading(true);
       setError('');
-      requestLogs(filters, cursor, 50, controller.signal).then(result => {
-        if (!controller.signal.aborted) setPayload(result);
+      const requestGeneration = generation.current;
+      requestLogs(filters, cursor, 50, controller.signal, snapshot.current).then(result => {
+        if (!controller.signal.aborted && requestGeneration === generation.current) {
+          snapshot.current = result.snapshot_max_id;
+          setPayload(result);
+        }
       }).catch(e => {
-        if (!controller.signal.aborted && e.name !== 'AbortError') {
+        if (!controller.signal.aborted && requestGeneration === generation.current && e.name !== 'AbortError') {
           setError(e.message);
           setPayload(null);
         }
       }).finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted && requestGeneration === generation.current) setLoading(false);
       });
       return () => controller.abort();
     }, [filters, cursor, tick]);
     React.useEffect(() => {
       if (!live || page !== 1) return;
       const timer = setInterval(() => {
-        if (document.visibilityState === 'visible') setTick(v => v + 1);
+        if (document.visibilityState === 'visible') { snapshot.current = null; generation.current++; setTick(v => v + 1); }
       }, 5000);
       return () => clearInterval(timer);
     }, [live, page]);
     const apply = next => {
+      snapshot.current = null;
+      generation.current++;
+      traceController.current?.abort();
+      setTraceLoading(false);
+      setTracePayload(null);
       setFilters({
         ...next
       });
@@ -156,47 +179,39 @@
       ...d,
       [key]: e.target.value
     }));
-    const trace = item => {
-      const next = {
-        ...freshFilters(),
-        min_level: 'DEBUG',
-        trace_id: item.trace_id
-      };
-      setDraft(next);
-      apply(next);
-      setSelected(null);
+    const trace = async item => {
+      traceController.current?.abort();
+      const controller = new AbortController();
+      traceController.current = controller;
+      setTraceLoading(true);
       setLive(false);
+      setError('');
+      try {
+        const response = await fetch('/api/logs/trace/' + encodeURIComponent(item.trace_id), {headers: window.AuthUtil.withAuthHeaders({}), signal: controller.signal, cache: 'no-store'});
+        if (!response.ok) throw new Error(response.status === 401 ? '登录已过期' : '链路读取失败');
+        const result = await response.json();
+        if (!controller.signal.aborted && mounted.current) {
+          setTracePayload(result);
+          setSelected(null);
+          setNotice(`已载入本轮全部保留事件 ${result.items.length} 条。DEBUG 未启用、保留清理和丢弃仍可能造成缺失。`);
+        }
+      } catch(e) {
+        if (mounted.current && !controller.signal.aborted) setError(e.message);
+      } finally {
+        if (mounted.current && !controller.signal.aborted) setTraceLoading(false);
+      }
     };
     const exportLogs = async () => {
       setExporting(true);
       setNotice('');
       try {
-        let before = null,
-          rows = [],
-          meta = null,
-          truncated = false;
-        do {
-          const result = await requestLogs(filters, before, 100);
-          rows = rows.concat(result.items || []);
-          meta = result.meta;
-          before = result.next_cursor;
-          if (rows.length >= 1000) {
-            truncated = Boolean(before);
-            break;
-          }
-        } while (before && mounted.current);
+        const activeFilters = tracePayload ? {...freshFilters(), min_level:'DEBUG', trace_id:tracePayload.applied_filters.trace_id} : filters;
+        const response = await fetch('/api/logs/export?' + paramsFor(activeFilters, null, 100, tracePayload?.snapshot_max_id ?? snapshot.current), {headers: window.AuthUtil.withAuthHeaders({}), cache:'no-store'});
+        if (!response.ok) throw new Error(response.status === 401 ? '登录已过期' : '日志导出失败');
+        const result = await response.json();
         if (!mounted.current) return;
-        const report = {
-          format: 'proactive-log-center-v1',
-          exported_at: new Date().toISOString(),
-          filters,
-          records_order: 'newest_first',
-          truncated,
-          max_records: 1000,
-          meta,
-          warning: '包含会话标识；分享前请再次检查。无正文、提示词、动态日志参数和原始异常消息。未知发送结果不代表送达。',
-          records: rows
-        };
+        const rows = result.items, truncated = result.truncated;
+        const report = {...result, format:'proactive-log-center-v2', exported_at:new Date().toISOString(), max_records:1000, records_order:'newest_first'};
         const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], {
           type: 'application/json'
         }));
@@ -205,15 +220,15 @@
         a.download = 'proactive-diagnostics-' + Date.now() + '.json';
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setNotice(`已导出 ${rows.length} 条${truncated ? '（达到 1000 条上限，请缩小筛选范围）' : ''}。文件含会话标识，分享前请检查。`);
+        setNotice(`已导出 ${rows.length} 条${truncated ? '（达到 1000 条上限，请缩小筛选范围）' : ''}。会话使用本次导出随机别名，不含映射。`);
       } catch (e) {
         if (mounted.current) setError(e.message);
       } finally {
         if (mounted.current) setExporting(false);
       }
     };
-    const items = payload?.items || [],
-      meta = payload?.meta;
+    const items = tracePayload?.items || payload?.items || [],
+      meta = tracePayload?.meta || payload?.meta;
     return /*#__PURE__*/React.createElement("section", {
       className: "logs-view",
       "aria-label": "\u65E5\u5FD7\u4E2D\u5FC3"
@@ -249,7 +264,7 @@
       sx: {
         mb: 2
       }
-    }, "\u65E5\u5FD7\u5B58\u50A8\u5F02\u5E38\uFF1A", meta.storage_error, "\u3002\u8BF7\u68C0\u67E5\u78C1\u76D8\u7A7A\u95F4\u548C\u76EE\u5F55\u6743\u9650\uFF1B\u4E3B\u52A8\u6D88\u606F\u7EE7\u7EED\u8FD0\u884C\uFF0C\u671F\u95F4\u65E5\u5FD7\u53EF\u80FD\u4E22\u5931\u3002"), !!meta?.dropped && /*#__PURE__*/React.createElement(Alert, {
+    }, "\u65E5\u5FD7\u5B58\u50A8\u5F02\u5E38\uFF1A", meta.storage_error, "\u3002\u8BF7\u68C0\u67E5\u78C1\u76D8\u7A7A\u95F4\u548C\u76EE\u5F55\u6743\u9650\uFF1B\u4E3B\u52A8\u6D88\u606F\u7EE7\u7EED\u8FD0\u884C\uFF0C\u671F\u95F4\u65E5\u5FD7\u53EF\u80FD\u4E22\u5931\u3002"), !!(meta?.dropped_total ?? meta?.dropped) && /*#__PURE__*/React.createElement(Alert, {
       severity: "warning",
       sx: {
         mb: 2
@@ -282,7 +297,7 @@
       value: key
     }, label))), /*#__PURE__*/React.createElement(TextField, {
       size: "small",
-      label: "\u4F1A\u8BDD ID\uFF08\u5B8C\u6574\u5339\u914D\uFF09",
+      label: "会话别名（完整匹配）",
       value: draft.session_id,
       onChange: update('session_id'),
       inputProps: {
@@ -314,7 +329,7 @@
       },
       value: draft.until,
       onChange: update('until')
-    }), /*#__PURE__*/React.createElement(Button, {
+    }), ['event_name','outcome','reason_code','provider_ref','operation_id','error_category'].map(key => React.createElement(TextField, {key, size:'small', label:({event_name:'事件名',outcome:'执行终态',reason_code:'原因码',provider_ref:'Provider 别名',operation_id:'操作 ID',error_category:'异常分类'})[key] + '（精确匹配）', value:draft[key], onChange:update(key)})), /*#__PURE__*/React.createElement(Button, {
       type: "submit",
       variant: "contained",
       disabled: loading
@@ -329,6 +344,9 @@
     }, /*#__PURE__*/React.createElement(Button, {
       variant: "outlined",
       onClick: () => {
+        snapshot.current = null;
+        generation.current++;
+        setTracePayload(null);
         setCursors([null]);
         setTick(v => v + 1);
       },
@@ -340,7 +358,7 @@
     }, live ? '暂停自动刷新' : '自动刷新（5 秒）'), /*#__PURE__*/React.createElement(Button, {
       onClick: exportLogs,
       disabled: loading || exporting || !items.length
-    }, exporting ? '正在导出…' : '导出筛选诊断 JSON'), /*#__PURE__*/React.createElement(Typography, {
+    }, exporting ? '正在导出…' : '导出筛选 JSON（最多 1000 条）'), /*#__PURE__*/React.createElement(Typography, {
       variant: "caption",
       sx: {
         ml: 'auto',
@@ -382,7 +400,7 @@
     }, "DEBUG \u5C1A\u672A\u91C7\u96C6\uFF0C\u8BF7\u5728\u914D\u7F6E\u4E2D\u663E\u5F0F\u5F00\u542F\u5E76\u91CD\u8F7D\u63D2\u4EF6\u3002")), /*#__PURE__*/React.createElement("div", {
       className: "logs-list",
       "aria-busy": loading
-    }, items.map(item => /*#__PURE__*/React.createElement("button", {
+    }, tracePayload && React.createElement(Button, {onClick:()=>{setTracePayload(null);setNotice('');}}, '返回筛选列表'), items.map(item => /*#__PURE__*/React.createElement("button", {
       className: "log-row",
       key: item.id,
       onClick: () => setSelected(item),
@@ -409,10 +427,10 @@
     }, /*#__PURE__*/React.createElement("span", null, item.session_id || '插件运行'), item.trace_id && /*#__PURE__*/React.createElement("span", null, "\u94FE\u8DEF ", item.trace_id.slice(0, 12)), item.details.source && /*#__PURE__*/React.createElement("span", null, item.details.source, ":", item.details.line))))), /*#__PURE__*/React.createElement("div", {
       className: "logs-pagination"
     }, /*#__PURE__*/React.createElement(Button, {
-      disabled: page === 1 || loading,
+      disabled: page === 1 || loading || !!tracePayload,
       onClick: () => setCursors(c => c.slice(0, -1))
     }, "\u4E0A\u4E00\u9875"), /*#__PURE__*/React.createElement("span", null, "\u7B2C ", page, " \u9875"), /*#__PURE__*/React.createElement(Button, {
-      disabled: !payload?.next_cursor || loading,
+      disabled: !payload?.next_cursor || loading || !!tracePayload,
       onClick: () => setCursors(c => [...c, payload.next_cursor])
     }, "\u4E0B\u4E00\u9875")), /*#__PURE__*/React.createElement(Dialog, {
       open: Boolean(selected),
@@ -451,8 +469,8 @@
     }, JSON.stringify(selected.details, null, 2)), selected.details.exception && /*#__PURE__*/React.createElement(Alert, {
       severity: "warning"
     }, "\u5F02\u5E38\u6D88\u606F\u3001\u6E90\u4EE3\u7801\u884C\u53CA\u5C40\u90E8\u53D8\u91CF\u5DF2\u9690\u85CF\u3002frames \u4FDD\u7559\u771F\u5B9E\u8C03\u7528\u6808\u4F4D\u7F6E\uFF1B\u8D85\u8FC7\u5B89\u5168\u5927\u5C0F\u7684\u6808\u4F1A\u6807\u6CE8\u622A\u65AD\u3002")), /*#__PURE__*/React.createElement(DialogActions, null, selected?.trace_id && /*#__PURE__*/React.createElement(Button, {
-      onClick: () => trace(selected)
-    }, "\u67E5\u770B\u672C\u6B21\u4EFB\u52A1\u5B8C\u6574\u94FE\u8DEF"), /*#__PURE__*/React.createElement(Button, {
+      onClick: () => trace(selected), disabled: traceLoading
+    }, "查看本轮全部保留事件"), /*#__PURE__*/React.createElement(Button, {
       onClick: () => setSelected(null)
     }, "\u5173\u95ED"))));
   }

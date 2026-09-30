@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -17,7 +18,7 @@ from astrbot.core.agent.message import (
 )
 
 from ..utils.time_utils import is_quiet_time
-from .log_center import emit, traced_task
+from .log_center import emit, traced_task, run_update
 
 
 class ProactiveCoreMixin:
@@ -72,12 +73,17 @@ class ProactiveCoreMixin:
 
         # 免打扰时段判断
         schedule_conf = session_config.get("schedule_settings", {})
-        quiet = is_quiet_time(schedule_conf.get("quiet_hours", "1-7"), self.timezone)
+        quiet_window = schedule_conf.get("quiet_hours", "1-7")
+        quiet = is_quiet_time(quiet_window, self.timezone)
+        quiet_match = re.fullmatch(r"([0-9]{1,2})-([0-9]{1,2})", str(quiet_window))
         emit(
             self,
             "condition_checked",
             session_id=session_id,
             condition="quiet_hours_active",
+            quiet_start=int(quiet_match[1]) if quiet_match else None,
+            quiet_end=int(quiet_match[2]) if quiet_match else None,
+            timezone=getattr(self.timezone, "key", "system_local"),
             value=quiet,
             expected=False,
             allowed=not quiet,
@@ -173,6 +179,7 @@ class ProactiveCoreMixin:
         # 对话历史会作为后续 LLM 上下文，写入空文本会破坏上下文结构，
         # 也会让回读校验产生误导性告警。
         if not (assistant_response or "").strip():
+            run_update(history_outcome="skipped_no_text")
             logger.debug("[主动消息] 本次结果无文本内容，跳过对话历史存档喵。")
         else:
             try:
@@ -198,6 +205,7 @@ class ProactiveCoreMixin:
                         "[主动消息] 本次主动消息已提交存档，但回读校验未命中末尾记录喵，请检查对话历史持久化是否正常喵。"
                     )
             except Exception as e:
+                emit(self, "history.failed", "WARNING", exception=e)
                 logger.error(f"[主动消息] 存档对话历史失败喵: {e}")
                 logger.warning("[主动消息] 对话存档失败喵，但会继续执行后续步骤喵。")
 
@@ -371,6 +379,15 @@ class ProactiveCoreMixin:
             emit(self, "generation_started", unanswered_count=unanswered_count)
             generation_started_at = time.monotonic()
             request_package = await self._prepare_llm_request(normalized_session_id)
+            emit(
+                self,
+                "context.prepared",
+                duration_ms=round((time.monotonic() - generation_started_at) * 1000),
+                outcome="available" if request_package else "unavailable",
+                history_count=len(request_package.get("history", []))
+                if request_package
+                else 0,
+            )
             if not request_package:
                 emit(self, "generation_empty", "WARNING", reason="context_unavailable")
                 await self._schedule_next_chat_and_save(normalized_session_id)
@@ -546,7 +563,19 @@ class ProactiveCoreMixin:
                 logger.info(
                     f"[主动消息] {self._get_session_log_str(session_id)} 的任务重新调度成功喵。"
                 )
+                emit(
+                    self,
+                    "retry.scheduled",
+                    retry_scope="next_run",
+                    same_operation=False,
+                    retry_delay_ms=None,
+                    unavailable_reason="not_measured",
+                )
             except Exception as se:
+                run_update(schedule_outcome="failed")
+                emit(
+                    self, "retry.failed", "ERROR", exception=se, retry_scope="next_run"
+                )
                 logger.error(f"[主动消息] 在错误处理中重新调度失败喵: {se}")
                 logger.error(
                     f"[主动消息] {self._get_session_log_str(session_id)} 可能需要手动干预喵。"

@@ -275,7 +275,7 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
             "counter_updated",
             "schedule_selected",
             "scheduled",
-            "task_finished",
+            "run.completed",
         ]:
             self.assertIn(expected, events)
         self.assertEqual(len({r["trace_id"] for r in rows}), 1)
@@ -326,8 +326,16 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
             self.plugin.check_and_chat("a"), self.plugin.check_and_chat("b")
         )
         rows = self.rows()
-        a = {r["trace_id"] for r in rows if r["session_id"] == "a"}
-        b = {r["trace_id"] for r in rows if r["session_id"] == "b"}
+        a = {
+            r["trace_id"]
+            for r in rows
+            if r["session_id"] == self.center.alias("session", "a")
+        }
+        b = {
+            r["trace_id"]
+            for r in rows
+            if r["session_id"] == self.center.alias("session", "b")
+        }
         self.assertEqual(len(a), 1)
         self.assertEqual(len(b), 1)
         self.assertTrue(a.isdisjoint(b))
@@ -483,10 +491,11 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             "returned_without_receipt",
         )
         platform.send_by_session.side_effect = TimeoutError("SECRET_RESPONSE")
-        self.assertTrue(await event.send(Chain([])))
+        self.assertFalse(await event.send(Chain([])))
+        plugin.context.send_message.assert_not_called()
         flush(self.center)
         rows = self.center.query()["items"]
-        self.assertIn("send_fallback", [r["event"] for r in rows])
+        self.assertIn("fallback.suppressed", [r["event"] for r in rows])
         self.assertNotIn("SECRET_RESPONSE", json.dumps(rows))
 
 
@@ -501,7 +510,7 @@ class ExtendedTests(unittest.IsolatedAsyncioTestCase):
             flush(center)
             events = [r["event"] for r in center.query()["items"]]
             self.assertIn("task_cancelled", events)
-            self.assertEqual(events[0], "task_finished")
+            self.assertEqual(events[0], "run.completed")
             center.close()
 
     async def test_queue_is_bounded_and_reports_loss(self):

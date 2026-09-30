@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid
 from typing import Any
 
 from .plugin_logger import logger
-from .log_center import emit
+from .log_center import alias, emit, error_code, hook_error_count, run_update
 from astrbot.api.provider import ProviderRequest
 
 from ..utils.time_utils import format_current_time
@@ -990,6 +992,7 @@ class LlmMixin:
                         session_id=session_id,
                         route="current_provider_id",
                         outcome="available",
+                        provider_ref=alias(self, "provider", id(provider)),
                     )
                     return provider
             except Exception as e:
@@ -1003,6 +1006,9 @@ class LlmMixin:
                 session_id=session_id,
                 route="session_fallback",
                 outcome="available" if provider else "unavailable",
+                provider_ref=alias(self, "provider", id(provider))
+                if provider
+                else None,
             )
             return provider
         except Exception as e:
@@ -1046,6 +1052,7 @@ class LlmMixin:
 
         provider = await self._resolve_chat_provider(session_id)
         if not provider:
+            emit(self, "generation_empty", "ERROR", reason="provider_missing")
             logger.warning("[主动消息] 未找到 LLM Provider，放弃并重新调度喵。")
             return None, final_user_simulation_prompt
 
@@ -1059,13 +1066,32 @@ class LlmMixin:
         )
 
         # 前置钩子：允许其他插件追加系统提示、注入工具、改写上下文等。
+        request_hook_error = False
+        request_hook_failures = hook_error_count()
         try:
             stopped = await self._dispatch_llm_request_hooks(event, req)
         except Exception as e:
+            request_hook_error = True
+            emit(
+                self,
+                "hook_result",
+                "WARNING",
+                route="request_hook",
+                outcome="error",
+                exception=e,
+            )
             logger.error(f"[主动消息] 派发 LLM 前置钩子失败喵: {e}")
             stopped = False
-        emit(self, "hook_result", stopped=bool(stopped), route="request_hook")
+        if not request_hook_error and hook_error_count() == request_hook_failures:
+            emit(
+                self,
+                "hook_result",
+                stopped=bool(stopped),
+                route="request_hook",
+                outcome="stop" if stopped else "pass",
+            )
         if stopped:
+            run_update(execution_outcome="skipped", reason="request_hook_stop")
             logger.info("[主动消息] LLM 前置钩子终止了事件传播，放弃本次请求喵。")
             return None, final_user_simulation_prompt
 
@@ -1107,15 +1133,34 @@ class LlmMixin:
 
         # 后置钩子：其他插件可在此清理标记、改写文本、追加图片等。
         response_stopped = False
+        response_hook_error = False
+        response_hook_failures = hook_error_count()
         try:
             response_stopped = await self._dispatch_llm_response_hooks(
                 event, llm_response_obj
             )
         except Exception as e:
+            response_hook_error = True
+            emit(
+                self,
+                "hook_result",
+                "WARNING",
+                route="response_hook",
+                outcome="error",
+                exception=e,
+            )
             logger.error(f"[主动消息] 派发 LLM 后置钩子失败喵: {e}")
 
-        emit(self, "hook_result", stopped=bool(response_stopped), route="response_hook")
+        if not response_hook_error and hook_error_count() == response_hook_failures:
+            emit(
+                self,
+                "hook_result",
+                stopped=bool(response_stopped),
+                route="response_hook",
+                outcome="stop" if response_stopped else "pass",
+            )
         if response_stopped:
+            run_update(execution_outcome="skipped", reason="response_hook_stop")
             # 与官方一致：事件被终止即视为本次结果不应投递（如内容审核拦截）。
             logger.info("[主动消息] LLM 后置钩子终止了事件传播，放弃本次生成结果喵。")
             return None, final_user_simulation_prompt
@@ -1283,7 +1328,43 @@ class LlmMixin:
                 key: value for key, value in call_kwargs.items() if key in supported
             }
 
-        return await provider.text_chat(**call_kwargs)
+        operation_id = uuid.uuid4().hex
+        metadata = {
+            "operation_id": operation_id,
+            "span_id": operation_id,
+            "attempt_no": 1,
+            "route": "text_chat",
+            "provider_ref": alias(self, "provider", id(provider)),
+            "model_ref": alias(self, "model", model),
+            "timeout_ms": None,
+            "unavailable_reason": "not_configured",
+        }
+        emit(self, "model.call.started", **metadata)
+        started = time.monotonic()
+        try:
+            result = await provider.text_chat(**call_kwargs)
+        except BaseException as exc:
+            if isinstance(exc, (Exception, asyncio.CancelledError)):
+                emit(
+                    self,
+                    "model.call.failed",
+                    "INFO" if isinstance(exc, asyncio.CancelledError) else "ERROR",
+                    **metadata,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    exception=exc,
+                    error_code=error_code(exc),
+                )
+            raise
+        emit(
+            self,
+            "model.call.finished",
+            **metadata,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            return_kind="none" if result is None else "object",
+        )
+        if result is None:
+            emit(self, "model.result.empty", "ERROR", **metadata)
+        return result
 
     def _extract_response_text(self, llm_response_obj: Any) -> str:
         """从 LLM 响应中安全提取纯文本。"""
