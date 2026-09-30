@@ -1,5 +1,7 @@
 # 详细日志中心 alpha2：范围与验证
 
+> 本文保留 alpha2 的历史范围。嵌套补发回执覆盖的 alpha3 修复与异步终态边界见 [alpha3 说明](log-center-alpha3.md)。
+
 版本：`v1.2.6+logcenter.alpha2`。这是个人 fork 内的测试版本，继续沿用 AGPL-3.0。插件基础为上游 `635fc18eeb84e3c7b58661425359244552286835`；本次不更新 fork 的原有 main，也不合并或部署。
 
 ## 输入与来源

@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
@@ -300,12 +300,18 @@ DETAIL_KEYS.update(
         "flow_returned_true",
         "planned_segments",
         "not_attempted_segments",
+        "parent_operation_id",
+        "after_run_terminal",
+        "pending_attempts",
     }
 )
 _operation: contextvars.ContextVar[OperationContext | None] = contextvars.ContextVar(
     "proactive_log_operation", default=None
 )
 _hook_failures = contextvars.ContextVar("proactive_hook_failures", default=0)
+_send_continuation: contextvars.ContextVar[tuple[object, object] | None] = (
+    contextvars.ContextVar("proactive_send_continuation", default=None)
+)
 
 
 def hook_error_count():
@@ -343,6 +349,80 @@ for _path in Path(__file__).resolve().parent.parent.rglob("*.py"):
         pass
 
 
+@dataclass
+class DeliveryCollector:
+    """One asyncio run's receipt ledger; shared by copied task contexts.
+
+    Only evidence is shared, never workflow stage or business state. Closing
+    freezes the terminal snapshot; late events remain attributable audit facts.
+    """
+
+    receipts: dict[str, str] = field(default_factory=dict)
+    plans: dict[str, int] = field(default_factory=dict)
+    parents: dict[str, str] = field(default_factory=dict)
+    pending: set[str] = field(default_factory=set)
+    closed: bool = False
+
+    def prepare(self, operation: OperationContext) -> None:
+        self.parents[operation.id] = operation.parent_id
+        if not self.closed and isinstance(operation.count, int):
+            self.plans[operation.id] = operation.count
+
+    def observe(self, operation: OperationContext, state: str | None) -> None:
+        if self.closed:
+            return
+        self.prepare(operation)
+        key = f"{operation.id}:{operation.segment}"
+        if state is None:
+            self.pending.add(key)
+            self.plans[operation.id] = max(
+                self.plans.get(operation.id, 0), operation.segment
+            )
+        else:
+            self.pending.discard(key)
+            # Explicit-failure -> accepted is one successful logical retry.
+            # Preserve prior uncertainty, and acceptance over explicit failure.
+            prior = self.receipts.get(key)
+            self.receipts[key] = (
+                "delivery_unknown"
+                if "delivery_unknown" in (prior, state)
+                else "accepted"
+                if "accepted" in (prior, state)
+                else state
+            )
+
+    def summary(self, scope: str | None = None, *, close: bool = False) -> dict:
+        if close:
+            self.closed = True
+
+        def included(operation_id):
+            if scope is None:
+                return True
+            seen = set()
+            while operation_id and operation_id not in seen:
+                if operation_id == scope:
+                    return True
+                seen.add(operation_id)
+                operation_id = self.parents.get(operation_id, "")
+            return False
+
+        receipts = {
+            key: state
+            for key, state in self.receipts.items()
+            if included(key.split(":")[0])
+        }
+        pending = {key for key in self.pending if included(key.split(":")[0])}
+        for key in pending:
+            receipts[key] = "delivery_unknown"
+        return {
+            **delivery_summary(
+                tuple(receipts.items()),
+                tuple((op, count) for op, count in self.plans.items() if included(op)),
+            ),
+            "pending_attempts": len(pending),
+        }
+
+
 @dataclass(frozen=True)
 class RunContext:
     center: object
@@ -356,8 +436,7 @@ class RunContext:
     history_outcome: str = "not_attempted"
     counter_outcome: str = "not_changed"
     schedule_outcome: str = "not_created"
-    receipts: tuple = ()
-    plans: tuple = ()
+    delivery: DeliveryCollector = field(default_factory=DeliveryCollector)
     error_id: str = ""
     errors: tuple = ()
     dropped_before: int = 0
@@ -370,7 +449,8 @@ class OperationContext:
     attempt: int = 0
     segment: int = 1
     count: int = 1
-    receipts: tuple = ()
+    parent_id: str = ""
+    delivery: DeliveryCollector = field(default_factory=DeliveryCollector)
 
 
 def run_update(**changes: Any) -> None:
@@ -461,22 +541,28 @@ def alias(plugin, kind, value):
 def send_operation(func):
     @functools.wraps(func)
     async def wrapped(self, *args, **kwargs):
-        if _operation.get():
+        continuation = _send_continuation.get()
+        if continuation and continuation[0] is self and continuation[1] is wrapped:
+            # Consume once: an unrelated send inside the delegate owns a child.
+            _send_continuation.set(None)
             return await func(self, *args, **kwargs)
-        token = _operation.set(OperationContext(uuid.uuid4().hex))
+        parent = _operation.get()
+        run = _trace.get()
+        collector = (
+            parent.delivery if parent else run.delivery if run else DeliveryCollector()
+        )
+        operation = OperationContext(
+            uuid.uuid4().hex,
+            parent_id=parent.id if parent else "",
+            delivery=collector,
+        )
+        collector.parents[operation.id] = operation.parent_id
+        token = _operation.set(operation)
         try:
             return await func(self, *args, **kwargs)
         finally:
             if func.__name__ == "_send_proactive_message":
-                result = delivery_summary(
-                    cast(OperationContext, _operation.get()).receipts,
-                    (
-                        (
-                            cast(OperationContext, _operation.get()).id,
-                            cast(OperationContext, _operation.get()).count,
-                        ),
-                    ),
-                )
+                result = collector.summary(operation.id)
                 emit(
                     self,
                     "send.completed",
@@ -489,6 +575,19 @@ def send_operation(func):
             _operation.reset(token)
 
     return wrapped
+
+
+async def delegated_send(callback, *args, **kwargs):
+    """Explicitly continue the current logical segment through one wrapper."""
+    target = (
+        getattr(callback, "__self__", None),
+        getattr(callback, "__func__", callback),
+    )
+    token = _send_continuation.set(target)
+    try:
+        return await callback(*args, **kwargs)
+    finally:
+        _send_continuation.reset(token)
 
 
 def send_segment(index, count):
@@ -791,6 +890,7 @@ class LogCenter:
                         "cause_event_id",
                         "previous_run_id",
                         "in_flight_operation",
+                        "parent_operation_id",
                     }
                     and re.fullmatch(r"[a-f0-9]{32}", value)
                     or key in {"provider_ref", "model_ref"}
@@ -849,11 +949,13 @@ class LogCenter:
                 )
             if (
                 event == "send_result"
-                and not trace.receipts
+                and not trace.delivery.receipts
+                and not trace.delivery.pending
                 and safe.get("outcome") == "flow_returned_true"
             ):
                 # A boolean from orchestration alone is not an API receipt.
-                changes["receipts"] = (("flow_return_only", "delivery_unknown"),)
+                if not trace.delivery.closed:
+                    trace.delivery.receipts["flow_return_only"] = "delivery_unknown"
             if event == "history_verified":
                 changes["history_outcome"] = "verified"
             if event == "history_unverified":
@@ -880,26 +982,21 @@ class LogCenter:
             if event == "send.prepared" and isinstance(safe.get("segment_count"), int):
                 operation = replace(operation, count=safe["segment_count"])
                 _operation.set(operation)
-                if trace and trace.center is self:
-                    plans = dict(cast(RunContext, _trace.get()).plans)
-                    plans[operation.id] = operation.count
-                    run_update(plans=tuple(plans.items()))
+                operation.delivery.prepare(operation)
             safe.update(
                 operation_id=operation.id,
                 attempt_no=operation.attempt,
                 segment_index=operation.segment,
                 segment_count=operation.count,
                 segment_id=f"{operation.id}:{operation.segment}",
+                parent_operation_id=operation.parent_id or None,
+                after_run_terminal=operation.delivery.closed,
             )
             safe["span_id"] = operation.id
-            if trace and trace.center is self and "receipt_state" in safe:
-                receipts = dict(cast(RunContext, _trace.get()).receipts)
-                receipts[safe["segment_id"]] = safe["receipt_state"]
-                run_update(receipts=tuple(receipts.items()))
+            if event == "send.attempt.started":
+                operation.delivery.observe(operation, None)
             if "receipt_state" in safe:
-                receipts = dict(operation.receipts)
-                receipts[safe["segment_id"]] = safe["receipt_state"]
-                _operation.set(replace(operation, receipts=tuple(receipts.items())))
+                operation.delivery.observe(operation, safe["receipt_state"])
         if exception:
             prior = (
                 dict(cast(RunContext, _trace.get()).errors).get(id(exception))
@@ -921,7 +1018,13 @@ class LogCenter:
         category, default_summary = EVENTS[event]
         if trace and trace.center is self:
             safe.setdefault("span_id", safe.get("operation_id", trace.id))
-            safe["parent_span_id"] = trace.id if safe["span_id"] != trace.id else None
+            safe["parent_span_id"] = (
+                operation.parent_id
+                if operation and operation.parent_id and event.startswith("send.")
+                else trace.id
+                if safe["span_id"] != trace.id
+                else None
+            )
         safe["redaction_policy_version"] = 2
         serialized = json.dumps(safe, ensure_ascii=False, allow_nan=False)
         if len(serialized.encode()) > 15000:
@@ -1469,7 +1572,7 @@ def traced_task(func):
             raise
         finally:
             run = cast(RunContext, _trace.get())
-            delivery = delivery_summary(run.receipts, run.plans)
+            delivery = run.delivery.summary(close=True)
             level = (
                 "ERROR"
                 if run.execution_outcome == "failed"
@@ -1494,7 +1597,9 @@ def traced_task(func):
                     "duration_ms": round((time.monotonic() - start) * 1000),
                     "dropped_before": run.dropped_before,
                     "dropped_after": center.dropped,
-                    "incomplete": bool(center._run_loss.get(run_id)),
+                    "incomplete": bool(
+                        center._run_loss.get(run_id) or delivery["pending_attempts"]
+                    ),
                     "completion_evidence": "phase_events",
                 },
             )
