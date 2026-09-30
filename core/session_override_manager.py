@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
 
 
 class SessionOverrideManager:

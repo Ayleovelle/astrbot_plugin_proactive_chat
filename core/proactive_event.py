@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import inspect
 import traceback
+import time
 import uuid
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
+from .log_center import emit
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -397,9 +399,33 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
                         ),
                         session_id=self._proactive_target_id,
                     )
-                    await platform.send_by_session(session_obj, message)
+                    started_at = time.monotonic()
+                    result = await platform.send_by_session(session_obj, message)
+                    emit(
+                        plugin,
+                        "send_api_result",
+                        session_id=self._proactive_umo,
+                        route="event_platform",
+                        outcome="explicit_success"
+                        if result is True
+                        else (
+                            "explicit_failure"
+                            if result is False
+                            else "returned_without_receipt"
+                        ),
+                        duration_ms=round((time.monotonic() - started_at) * 1000),
+                    )
                     sent = True
                 except Exception as e:
+                    emit(
+                        plugin,
+                        "send_fallback",
+                        "WARNING",
+                        session_id=self._proactive_umo,
+                        route="event_platform_to_core",
+                        outcome="unknown_after_exception",
+                        exception=e,
+                    )
                     logger.error(f"[主动消息] 平台发送失败喵，尝试核心 API 兜底: {e}")
 
         if not sent:
@@ -426,8 +452,33 @@ class ProactiveMessageEvent(_EventBase):  # type: ignore[misc, valid-type]
         if plugin is None:
             return False
         try:
+            started_at = time.monotonic()
             result = await plugin.context.send_message(self._proactive_umo, message)
+            emit(
+                plugin,
+                "send_api_result",
+                "WARNING" if result is False else "INFO",
+                session_id=self._proactive_umo,
+                route="event_core",
+                outcome="explicit_success"
+                if result is True
+                else (
+                    "explicit_failure"
+                    if result is False
+                    else "returned_without_receipt"
+                ),
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+            )
         except Exception as e:  # pragma: no cover - 取决于运行时
+            emit(
+                plugin,
+                "send_api_result",
+                "ERROR",
+                session_id=self._proactive_umo,
+                route="event_core",
+                outcome="unknown_after_exception",
+                exception=e,
+            )
             logger.error(f"[主动消息] 核心 API 发送失败喵: {e}")
             return False
         # 官方实现返回 bool：False 表示没有找到匹配平台，消息实际未发出，

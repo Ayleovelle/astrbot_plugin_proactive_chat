@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 import aiofiles
 import aiofiles.os as aio_os
 
-from astrbot.api import logger
+from .plugin_logger import logger
 
 from ..utils.version import get_plugin_version
 

@@ -36,7 +36,6 @@
         var libs = isCN ? [
             '/react/18.2.0/files/umd/react.production.min.js',
             '/react-dom/18.2.0/files/umd/react-dom.production.min.js',
-            '/@babel/standalone/7.25.6/files/babel.min.js',
             '/@mui/material/5.16.7/files/umd/material-ui.production.min.js',
             '/@emotion/react/11.13.3/files/dist/emotion-react.umd.min.js',
             '/@emotion/styled/11.13.0/files/dist/emotion-styled.umd.min.js',
@@ -46,7 +45,6 @@
         ] : [
             '/react@18.2.0/umd/react.production.min.js',
             '/react-dom@18.2.0/umd/react-dom.production.min.js',
-            '/@babel/standalone@7.25.6/babel.min.js',
             '/@mui/material@5.16.7/umd/material-ui.production.min.js',
             '/@emotion/react@11.13.3/dist/emotion-react.umd.min.js',
             '/@emotion/styled@11.13.0/dist/emotion-styled.umd.min.js',
@@ -382,18 +380,19 @@
          Release 打包会统一把这些引用改写为预编译后的 .js，并将 isBabel 标志置为 false，
          请勿在源码中手动改写，以免破坏开发态的动态编译。 -->
     <script>
-        window.ProactiveLoader.queueScript("js/context/AppContext.jsx", true);
-        window.ProactiveLoader.queueScript("js/hooks/useApi.js", true);
-        window.ProactiveLoader.queueScript("js/hooks/useWebSocket.js", true);
-        window.ProactiveLoader.queueScript("js/components/layout/Sidebar.jsx", true);
-        window.ProactiveLoader.queueScript("js/components/layout/Header.jsx", true);
-        window.ProactiveLoader.queueScript("js/views/StatusView.jsx", true);
-        window.ProactiveLoader.queueScript("js/components/config/ConfigRenderer.jsx", true);
-        window.ProactiveLoader.queueScript("js/views/ConfigView.jsx", true);
-        window.ProactiveLoader.queueScript("js/views/TasksView.jsx", true);
-        window.ProactiveLoader.queueScript("js/views/NotificationsView.jsx", true);
-        window.ProactiveLoader.queueScript("js/views/MarkdownDocsView.jsx", true);
-        window.ProactiveLoader.queueScript("js/app.jsx", true);
+        window.ProactiveLoader.queueScript("js/context/AppContext.js", false);
+        window.ProactiveLoader.queueScript("js/hooks/useApi.js", false);
+        window.ProactiveLoader.queueScript("js/hooks/useWebSocket.js", false);
+        window.ProactiveLoader.queueScript("js/components/layout/Sidebar.js", false);
+        window.ProactiveLoader.queueScript("js/components/layout/Header.js", false);
+        window.ProactiveLoader.queueScript("js/views/StatusView.js", false);
+        window.ProactiveLoader.queueScript("js/components/config/ConfigRenderer.js", false);
+        window.ProactiveLoader.queueScript("js/views/ConfigView.js", false);
+        window.ProactiveLoader.queueScript("js/views/TasksView.js", false);
+        window.ProactiveLoader.queueScript("js/views/NotificationsView.js", false);
+        window.ProactiveLoader.queueScript("js/views/LogsView.js", false);
+        window.ProactiveLoader.queueScript("js/views/MarkdownDocsView.js", false);
+        window.ProactiveLoader.queueScript("js/app.js", false);
     </script>
 </body>
 

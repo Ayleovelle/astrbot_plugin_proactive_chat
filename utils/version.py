@@ -4,7 +4,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 
 import astrbot
-from astrbot.api import logger
+from ..core.plugin_logger import logger
 
 try:
     import tomllib

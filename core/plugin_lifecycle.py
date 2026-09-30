@@ -11,7 +11,7 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import astrbot.api.star as star
-from astrbot.api import logger
+from .plugin_logger import logger
 
 
 class LifecycleMixin:

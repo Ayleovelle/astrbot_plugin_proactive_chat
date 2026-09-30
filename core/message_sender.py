@@ -15,10 +15,12 @@ import math
 import random
 import re
 import traceback
+import time
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
+from .log_center import emit
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import (
     MessageChain,
@@ -421,11 +423,35 @@ class SenderMixin:
 
         try:
             session_obj = MS(platform_name=p_id, message_type=m_type, session_id=t_id)
-            await target_platform.send_by_session(session_obj, chain)
+            send_started_at = time.monotonic()
+            platform_result = await target_platform.send_by_session(session_obj, chain)
+            emit(
+                self,
+                "send_api_result",
+                session_id=session_id,
+                route="platform",
+                outcome="explicit_success"
+                if platform_result is True
+                else (
+                    "explicit_failure"
+                    if platform_result is False
+                    else "returned_without_receipt"
+                ),
+                duration_ms=round((time.monotonic() - send_started_at) * 1000),
+            )
             logger.debug(f"[主动消息] 消息将通过平台 {p_id} 送达喵")
             await self._persist_proactive_message_to_platform_history(session_id, chain)
             return True
         except Exception as e:
+            emit(
+                self,
+                "send_fallback",
+                "WARNING",
+                session_id=session_id,
+                route="platform_to_core",
+                outcome="unknown_after_exception",
+                exception=e,
+            )
             logger.error(f"[主动消息] 通过平台 {p_id} 发送失败喵: {e}")
             logger.debug(traceback.format_exc())
             if self.telemetry and self.telemetry.enabled:
@@ -451,8 +477,33 @@ class SenderMixin:
             True 表示已成功送达；False 表示未送达。
         """
         try:
+            send_started_at = time.monotonic()
             result = await self.context.send_message(session_id, chain)
+            emit(
+                self,
+                "send_api_result",
+                "WARNING" if result is False else "INFO",
+                session_id=session_id,
+                route="core",
+                outcome="explicit_success"
+                if result is True
+                else (
+                    "explicit_failure"
+                    if result is False
+                    else "returned_without_receipt"
+                ),
+                duration_ms=round((time.monotonic() - send_started_at) * 1000),
+            )
         except Exception as e:
+            emit(
+                self,
+                "send_api_result",
+                "ERROR",
+                session_id=session_id,
+                route="core",
+                outcome="unknown_after_exception",
+                exception=e,
+            )
             logger.error(f"[主动消息] 核心 API 发送失败喵: {e}")
             return False
 
@@ -485,10 +536,33 @@ class SenderMixin:
             try:
                 # 事件发送内部已在成功送达后补写平台流水，
                 # 因此这里不再重复补写，避免同一条消息被写入两次。
+                send_started_at = time.monotonic()
                 sent = await event.send(chain)
+                emit(
+                    self,
+                    "send_api_result",
+                    "WARNING" if sent is False or sent is None else "INFO",
+                    session_id=session_id,
+                    route="event",
+                    outcome="explicit_success"
+                    if sent is True
+                    else (
+                        "explicit_failure" if sent is False else "unknown_no_receipt"
+                    ),
+                    duration_ms=round((time.monotonic() - send_started_at) * 1000),
+                )
             except Exception as e:
                 # 仅“抛出异常”才回退直发：此时送达状态未知
                 # （可能已投递但响应超时），值得再用直发路径尝试一次。
+                emit(
+                    self,
+                    "send_fallback",
+                    "WARNING",
+                    session_id=session_id,
+                    route="event_to_platform",
+                    outcome="unknown_after_exception",
+                    exception=e,
+                )
                 logger.error(f"[主动消息] 事件发送异常喵，回退平台直发: {e}")
                 sent_direct = await self._send_chain_direct(session_id, components)
                 if sent_direct:
@@ -620,6 +694,13 @@ class SenderMixin:
                 event, base_components
             )
             if not should_send:
+                emit(
+                    self,
+                    "send_blocked",
+                    "WARNING",
+                    session_id=session_id,
+                    reason="decorating_hook",
+                )
                 self._clear_event_result(event)
                 return False
             if not decorated_chain:

@@ -8,7 +8,8 @@ import time
 from datetime import datetime
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
+from .log_center import emit
 
 
 class SchedulerMixin:
@@ -238,6 +239,12 @@ class SchedulerMixin:
             id=normalized,
             replace_existing=True,
             misfire_grace_time=60,
+        )
+        emit(
+            self,
+            "scheduled",
+            session_id=normalized,
+            next_trigger_time=run_date.timestamp(),
         )
 
     def _has_related_persisted_task(self, session_id: str) -> bool:
@@ -542,9 +549,19 @@ class SchedulerMixin:
 
             # 用户回复时重置计数器
             if reset_counter:
+                previous_count = self.session_data.get(normalized_session_id, {}).get(
+                    "unanswered_count", 0
+                )
                 self.session_data.setdefault(normalized_session_id, {})[
                     "unanswered_count"
                 ] = 0
+                emit(
+                    self,
+                    "counter_reset",
+                    session_id=normalized_session_id,
+                    previous_count=previous_count,
+                    unanswered_count=0,
+                )
 
             # 计算随机触发时间
             min_interval = int(schedule_conf.get("min_interval_minutes", 30)) * 60
@@ -552,6 +569,14 @@ class SchedulerMixin:
                 min_interval, int(schedule_conf.get("max_interval_minutes", 900)) * 60
             )
             random_interval = random.randint(min_interval, max_interval)
+            emit(
+                self,
+                "schedule_selected",
+                session_id=normalized_session_id,
+                min_interval_seconds=min_interval,
+                max_interval_seconds=max_interval,
+                chosen_interval_seconds=random_interval,
+            )
             scheduled_at = time.time()
             next_trigger_time = scheduled_at + random_interval
             run_date = datetime.fromtimestamp(next_trigger_time, tz=self.timezone)
@@ -658,6 +683,14 @@ class SchedulerMixin:
                     int(schedule_conf.get("max_interval_minutes", 900)) * 60,
                 )
                 random_interval = random.randint(min_interval, max_interval)
+                emit(
+                    self,
+                    "schedule_selected",
+                    session_id=session_id,
+                    min_interval_seconds=min_interval,
+                    max_interval_seconds=max_interval,
+                    chosen_interval_seconds=random_interval,
+                )
                 scheduled_at = time.time()
                 next_trigger_time = scheduled_at + random_interval
                 run_date = datetime.fromtimestamp(next_trigger_time, tz=self.timezone)

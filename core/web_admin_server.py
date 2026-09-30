@@ -15,14 +15,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
 
 from ..utils.version import get_plugin_version
 
 try:
     # Web 管理端完全基于 FastAPI / Uvicorn 提供 HTTP 与 WebSocket 能力。
     import uvicorn
-    from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -205,6 +205,44 @@ class WebAdminServer:
                 return FileResponse(str(logo_path), media_type="image/png")
             return JSONResponse({"error": "logo not found"}, status_code=404)
 
+        @self.app.get("/api/logs")
+        async def get_logs(
+            min_level: str = "INFO",
+            category: str = "",
+            session_id: str = Query(default="", max_length=256),
+            trace_id: str = Query(default="", max_length=64),
+            since: float | None = Query(default=None, ge=0, le=32503680000),
+            until: float | None = Query(default=None, ge=0, le=32503680000),
+            before_id: int | None = Query(default=None, ge=1),
+            limit: int = Query(default=50, ge=1, le=100),
+        ):
+            center = getattr(self.plugin, "log_center", None)
+            if not center:
+                return JSONResponse(
+                    {"error": "日志中心不可用，请重载插件"}, status_code=503
+                )
+            try:
+                result = await asyncio.to_thread(
+                    center.query,
+                    min_level=min_level,
+                    category=category,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    since=since,
+                    until=until,
+                    before_id=before_id,
+                    limit=limit,
+                )
+                return JSONResponse(result, headers={"Cache-Control": "no-store"})
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            except Exception:
+                # Do not journal journal-reading failures or expose SQLite paths.
+                return JSONResponse(
+                    {"error": "日志存储暂时不可读，请检查磁盘或稍后重试"},
+                    status_code=503,
+                )
+
         @self.app.get("/api/status")
         async def get_status():
             # 汇总插件运行状态、计时器与连接数，供首页卡片与轮询逻辑使用。
@@ -262,6 +300,7 @@ class WebAdminServer:
                 "friend_settings": dict(self.config.get("friend_settings", {})),
                 "group_settings": dict(self.config.get("group_settings", {})),
                 "web_admin": web_admin,
+                "log_center": dict(self.config.get("log_center", {})),
                 "notification_settings": dict(
                     self.config.get("notification_settings", {})
                 ),
@@ -285,7 +324,12 @@ class WebAdminServer:
         @self.app.post("/api/config")
         async def update_config(payload: dict[str, Any]):
             # 仅允许更新这三个一级配置块，避免前端误写其它未知字段。
-            allowed_keys = {"friend_settings", "group_settings", "web_admin"}
+            allowed_keys = {
+                "friend_settings",
+                "group_settings",
+                "web_admin",
+                "log_center",
+            }
             for key in allowed_keys:
                 if key not in payload:
                     continue
@@ -752,8 +796,8 @@ class WebAdminServer:
         if not token:
             return False
         if token == "no-auth":
-            # 在未启用鉴权时允许该哨兵令牌直接通过。
-            return True
+            # 哨兵不能绕过已启用的密码认证。
+            return not self._auth_enabled
         expire_at = self._tokens.get(token)
         if not expire_at:
             return False

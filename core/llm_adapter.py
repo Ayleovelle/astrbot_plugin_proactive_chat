@@ -20,7 +20,8 @@ import asyncio
 import json
 from typing import Any
 
-from astrbot.api import logger
+from .plugin_logger import logger
+from .log_center import emit
 from astrbot.api.provider import ProviderRequest
 
 from ..utils.time_utils import format_current_time
@@ -657,6 +658,20 @@ class LlmMixin:
             f"平台流水原始记录 {platform_records_count} 条，注入上下文 {platform_injected_count} 条，"
             f"平台流水上下文长度 {platform_chars} 字，最终稳定上下文共 {len(contexts)} 条喵。"
         )
+        emit(
+            self,
+            "context_selected",
+            session_id=session_id,
+            source_mode=source_mode if source_mode in mode_label_map else "unknown",
+            history_count=conversation_count,
+            platform_records=platform_records_count,
+            injected_count=platform_injected_count,
+            platform_chars=platform_chars,
+            context_count=len(contexts),
+            reason="platform_context_available"
+            if platform_context
+            else "conversation_history_only",
+        )
         return contexts, platform_context
 
     async def _prepare_llm_request(
@@ -969,12 +984,27 @@ class LlmMixin:
                     provider_id
                 )
                 if provider:
+                    emit(
+                        self,
+                        "provider_selected",
+                        session_id=session_id,
+                        route="current_provider_id",
+                        outcome="available",
+                    )
                     return provider
             except Exception as e:
                 logger.warning(f"[主动消息] 按 ID 获取 Provider 失败喵: {e}")
 
         try:
-            return self.context.get_using_provider(umo=session_id)
+            provider = self.context.get_using_provider(umo=session_id)
+            emit(
+                self,
+                "provider_selected",
+                session_id=session_id,
+                route="session_fallback",
+                outcome="available" if provider else "unavailable",
+            )
+            return provider
         except Exception as e:
             logger.warning(f"[主动消息] 回退获取 Provider 失败喵: {e}")
             return None
@@ -1034,6 +1064,7 @@ class LlmMixin:
         except Exception as e:
             logger.error(f"[主动消息] 派发 LLM 前置钩子失败喵: {e}")
             stopped = False
+        emit(self, "hook_result", stopped=bool(stopped), route="request_hook")
         if stopped:
             logger.info("[主动消息] LLM 前置钩子终止了事件传播，放弃本次请求喵。")
             return None, final_user_simulation_prompt
@@ -1083,6 +1114,7 @@ class LlmMixin:
         except Exception as e:
             logger.error(f"[主动消息] 派发 LLM 后置钩子失败喵: {e}")
 
+        emit(self, "hook_result", stopped=bool(response_stopped), route="response_hook")
         if response_stopped:
             # 与官方一致：事件被终止即视为本次结果不应投递（如内容审核拦截）。
             logger.info("[主动消息] LLM 后置钩子终止了事件传播，放弃本次生成结果喵。")
