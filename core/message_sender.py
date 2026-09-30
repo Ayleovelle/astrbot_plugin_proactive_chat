@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from .plugin_logger import logger
-from .log_center import emit, observed_send, send_operation, send_segment
+from .log_center import (
+    emit,
+    observed_send,
+    send_operation,
+    send_segment,
+    delegated_send,
+)
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import (
     MessageChain,
@@ -399,11 +405,15 @@ class SenderMixin:
         parsed = self._parse_session_id(session_id)
         if not parsed:
             # 无法解析则使用核心 API 兜底
-            return await self._send_chain_via_core_api(session_id, chain)
+            return await delegated_send(
+                self._send_chain_via_core_api, session_id, chain
+            )
 
         p_id, m_type_str, t_id = parsed
         if MS is None:  # pragma: no cover - 极旧版本
-            return await self._send_chain_via_core_api(session_id, chain)
+            return await delegated_send(
+                self._send_chain_via_core_api, session_id, chain
+            )
 
         # 依据 UMO 的“消息类型段”精确判定会话类型。
         m_type = resolve_message_type(m_type_str)
@@ -416,7 +426,9 @@ class SenderMixin:
             logger.warning(
                 f"[主动消息] 找不到指定的平台 {p_id} 喵，尝试使用核心 API 兜底喵。"
             )
-            return await self._send_chain_via_core_api(session_id, chain)
+            return await delegated_send(
+                self._send_chain_via_core_api, session_id, chain
+            )
 
         if target_platform.status != PlatformStatus.RUNNING:
             logger.warning(f"[主动消息] 平台 {p_id} 未运行喵，跳过主动消息喵。")
@@ -460,7 +472,9 @@ class SenderMixin:
                     duplicate_risk=False,
                     exception=e,
                 )
-                return await self._send_chain_via_core_api(session_id, chain)
+                return await delegated_send(
+                    self._send_chain_via_core_api, session_id, chain
+                )
             emit(
                 self,
                 "fallback.suppressed",
@@ -560,7 +574,7 @@ class SenderMixin:
                 # 因此这里不再重复补写，避免同一条消息被写入两次。
                 send_started_at = time.monotonic()
                 sent = (
-                    await event.send(chain)
+                    await delegated_send(event.send, chain)
                     if getattr(event, "_proactive_plugin", None) is not None
                     else await observed_send(self, "event", lambda: event.send(chain))
                 )
@@ -609,7 +623,7 @@ class SenderMixin:
             logger.error("[主动消息] 事件发送与核心 API 兜底均未送达，不再重复尝试喵。")
             return False
 
-        return await self._send_chain_direct(session_id, components)
+        return await delegated_send(self._send_chain_direct, session_id, components)
 
     @send_operation
     async def _send_proactive_message(
@@ -670,8 +684,11 @@ class SenderMixin:
                         tts_attempted = True
                         send_segment(1, None)
                         is_tts_sent = (
-                            await self._send_chain(
-                                session_id, event, [Record(file=audio_path)]
+                            await delegated_send(
+                                self._send_chain,
+                                session_id,
+                                event,
+                                [Record(file=audio_path)],
                             )
                             is True
                         )
@@ -760,7 +777,12 @@ class SenderMixin:
                             idx + 1 + int(tts_attempted),
                             len(send_chain) + int(tts_attempted),
                         )
-                        if await self._send_chain(session_id, event, [comp]) is True:
+                        if (
+                            await delegated_send(
+                                self._send_chain, session_id, event, [comp]
+                            )
+                            is True
+                        ):
                             any_sent = True
                         if idx < len(send_chain) - 1:
                             interval = await self._calc_interval(
@@ -772,7 +794,12 @@ class SenderMixin:
                             await asyncio.sleep(interval)
                 else:
                     send_segment(1 + int(tts_attempted), 1 + int(tts_attempted))
-                    if await self._send_chain(session_id, event, send_chain) is True:
+                    if (
+                        await delegated_send(
+                            self._send_chain, session_id, event, send_chain
+                        )
+                        is True
+                    ):
                         any_sent = True
 
                 if self.telemetry and self.telemetry.enabled:
